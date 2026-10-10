@@ -206,7 +206,7 @@ sudo apt install -y gcc-mingw-w64-i686 g++-mingw-w64-i686 binutils-mingw-w64-i68
 #### Build Steps
 ```bash
 # Clone with submodules
-git clone --recurse-submodules <repository_url>
+git clone --recurse-submodules https://github.com/Madotsukanai/th06util
 cd th06util
 
 # Place your original Touhou Koumakyou ver 1.02h executable (kouma.exe) as resources/game.exe
@@ -238,7 +238,7 @@ Open a Command Prompt (e.g. Developer Command Prompt for VS) and run:
 
 ```cmd
 :: Clone with submodules
-git clone --recurse-submodules <repository_url>
+git clone --recurse-submodules https://github.com/Madotsukanai/th06util
 cd th06util
 
 :: Place your original Touhou Koumakyou ver 1.02h executable (kouma.exe) as resources\game.exe

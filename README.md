@@ -207,7 +207,7 @@ sudo apt install -y gcc-mingw-w64-i686 g++-mingw-w64-i686 binutils-mingw-w64-i68
 #### ビルド手順
 ```bash
 # サブモジュールを含めてクローン
-git clone --recurse-submodules <リポジトリURL>
+git clone --recurse-submodules https://github.com/Madotsukanai/th06util
 cd th06util
 
 # 東方紅魔郷 ver 1.02h の原本 (kouma.exe) を resources/game.exe として配置
@@ -239,7 +239,7 @@ Windows 上のコマンドプロンプトや Visual Studio 開発者コマンド
 
 ```cmd
 :: サブモジュールを含めてクローン
-git clone --recurse-submodules <リポジトリURL>
+git clone --recurse-submodules https://github.com/Madotsukanai/th06util
 cd th06util
 
 :: 東方紅魔郷 ver 1.02h の原本 (kouma.exe) を resources\game.exe として配置
