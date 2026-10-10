@@ -331,6 +331,7 @@ bool SoundFontSynth::Open(const char *soundfontName)
         {
             useEmbedded = true;
             strncpy(chosenDisplayName, EMBEDDED_SOUNDFONT_NAME, sizeof(chosenDisplayName) - 1);
+            chosenDisplayName[sizeof(chosenDisplayName) - 1] = '\0';
         }
         else
         {
@@ -339,11 +340,14 @@ bool SoundFontSynth::Open(const char *soundfontName)
             {
                 useEmbedded = true;
                 strncpy(chosenDisplayName, EMBEDDED_SOUNDFONT_NAME, sizeof(chosenDisplayName) - 1);
+                chosenDisplayName[sizeof(chosenDisplayName) - 1] = '\0';
             }
             else
             {
                 strncpy(targetFile, sf, sizeof(targetFile) - 1);
+                targetFile[sizeof(targetFile) - 1] = '\0';
                 strncpy(chosenDisplayName, sf, sizeof(chosenDisplayName) - 1);
+                chosenDisplayName[sizeof(chosenDisplayName) - 1] = '\0';
             }
         }
     }
@@ -351,6 +355,7 @@ bool SoundFontSynth::Open(const char *soundfontName)
     {
         useEmbedded = true;
         strncpy(chosenDisplayName, EMBEDDED_SOUNDFONT_NAME, sizeof(chosenDisplayName) - 1);
+        chosenDisplayName[sizeof(chosenDisplayName) - 1] = '\0';
     }
 
     if (useEmbedded)
@@ -361,6 +366,7 @@ bool SoundFontSynth::Open(const char *soundfontName)
             return false;
         }
         strncpy(targetFile, EMBEDDED_SOUNDFONT_PATH, sizeof(targetFile) - 1);
+        targetFile[sizeof(targetFile) - 1] = '\0';
     }
     else if (targetFile[0] == '\0')
     {
@@ -415,6 +421,7 @@ bool SoundFontSynth::Open(const char *soundfontName)
     }
 
     strncpy(s_currentSoundFont, chosenDisplayName, sizeof(s_currentSoundFont) - 1);
+    s_currentSoundFont[sizeof(s_currentSoundFont) - 1] = '\0';
 
     s_queueTail = s_queueHead = 0;
 
@@ -677,6 +684,7 @@ bool SoundFontSynth::BrowseSoundFontFile(HWND hwndOwner)
     if (g_MidiSoundFont[0] != '\0' && _stricmp(g_MidiSoundFont, EMBEDDED_SOUNDFONT_NAME) != 0)
     {
         strncpy(initDir, g_MidiSoundFont, sizeof(initDir) - 1);
+        initDir[sizeof(initDir) - 1] = '\0';
         char *sep = strrchr(initDir, '\\');
         char *sep2 = strrchr(initDir, '/');
         char *last = (sep2 > sep) ? sep2 : sep;

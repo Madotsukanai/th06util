@@ -127,6 +127,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         lastSlash[1] = '\0';
     }
 
+    // Clean up any leftover patched executable from a previous run
+    char leftoverPatchedExe[MAX_PATH];
+    snprintf(leftoverPatchedExe, MAX_PATH, "%s%s", moduleDir, PATCHED_EXE_NAME);
+    DeleteFileA(leftoverPatchedExe);
+
     char originalExePath[MAX_PATH];
     char customPatchPath[MAX_PATH] = "";
 
@@ -246,7 +251,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     STARTUPINFOA si = {sizeof(si)};
     PROCESS_INFORMATION pi;
     char workDir[MAX_PATH];
-    strncpy(workDir, moduleDir, MAX_PATH);
+    strncpy(workDir, moduleDir, sizeof(workDir) - 1);
+    workDir[sizeof(workDir) - 1] = '\0';
     size_t workDirLen = strlen(workDir);
     if (workDirLen > 0 && workDir[workDirLen - 1] == '\\')
     {
