@@ -1,0 +1,15 @@
+LIBRARY th06_spell_practice
+EXPORTS
+    th06_spell_practice_open_menu
+    th06_spell_practice_update_menu
+    th06_spell_practice_draw_menu
+    th06_spell_practice_get_draw_data
+    th06_spell_practice_get_selected_spell
+    th06_spell_practice_get_lives
+    th06_spell_practice_set_lives
+    th06_spell_practice_get_bombs
+    th06_spell_practice_set_bombs
+    th06_spell_practice_get_rank
+    th06_spell_practice_set_rank
+    th06_spell_practice_apply_ecl_patch
+    th06_spell_practice_set_cursor_to_spell

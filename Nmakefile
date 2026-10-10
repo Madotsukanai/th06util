@@ -1,0 +1,45 @@
+# ====================================================================
+# Nmakefile for Windows (Microsoft NMAKE)
+# ====================================================================
+# Usage:
+#   nmake /f Nmakefile           Build all (th06util.exe, launcher.exe, patch, dll)
+#   nmake /f Nmakefile game      Build th06util.exe only
+#   nmake /f Nmakefile extras    Build companion tools (launcher, patch, dll)
+#   nmake /f Nmakefile package   Create build\th06UtilityTool.zip
+#   nmake /f Nmakefile clean     Clean build artifacts
+# ====================================================================
+
+PYTHON = python
+JOBS = 4
+
+all:
+	$(PYTHON) scripts\build.py all -j$(JOBS)
+
+game:
+	$(PYTHON) scripts\build.py game -j$(JOBS)
+
+extras:
+	$(PYTHON) scripts\build.py extras
+
+package:
+	$(PYTHON) scripts\build.py package -j$(JOBS)
+
+clean:
+	$(PYTHON) scripts\build.py clean
+
+distclean:
+	$(PYTHON) scripts\build.py distclean
+
+submodules:
+	git submodule update --init --recursive
+
+help:
+	@echo th06UtilityTool Build System (Windows NMAKE)
+	@echo.
+	@echo Usage:
+	@echo   nmake /f Nmakefile           - Build all targets
+	@echo   nmake /f Nmakefile game      - Build th06util.exe only
+	@echo   nmake /f Nmakefile extras    - Build companion tools
+	@echo   nmake /f Nmakefile package   - Create release ZIP package
+	@echo   nmake /f Nmakefile clean     - Remove build artifacts
+	@echo   nmake /f Nmakefile distclean - Remove entire build directory

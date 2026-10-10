@@ -1,0 +1,6 @@
+[submodule "3rdparty/miniupnp"]
+	path = 3rdparty/miniupnp
+	url = https://github.com/miniupnp/miniupnp
+[submodule "3rdparty/fluidsynth"]
+	path = 3rdparty/fluidsynth
+	url = https://github.com/fluidsynth/fluidsynth
