@@ -18,10 +18,7 @@
 namespace th06
 {
 
-static void NetworkLog(const char *fmt, ...)
-{
-    (void)fmt;
-}
+#define NetworkLog(...) ((void)0)
 
 NetworkManager g_NetworkManager;
 

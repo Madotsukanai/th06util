@@ -2454,7 +2454,7 @@ i32 MainMenu::ReplayHandling()
         {
             if (LoadReplayMenu(this))
             {
-                g_GameErrorContext.Log("japanese");
+                g_GameErrorContext.Log(TH_ERR_MAINMENU_LOAD_SELECT_SCREEN_FAILED);
                 g_Supervisor.curState = SUPERVISOR_STATE_EXITSUCCESS;
                 return ZUN_SUCCESS;
             }

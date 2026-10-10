@@ -290,6 +290,7 @@ SoundFontList SoundFontSynth::ScanSoundFonts()
         if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY))
         {
             strncpy(list.names[list.count], g_MidiSoundFont, MAX_SOUNDFONT_NAME - 1);
+            list.names[list.count][MAX_SOUNDFONT_NAME - 1] = '\0';
             list.currentIndex = list.count;
             list.count++;
         }
@@ -298,6 +299,7 @@ SoundFontList SoundFontSynth::ScanSoundFonts()
     if (HasEmbeddedSoundFont() && list.count < MAX_SOUNDFONTS)
     {
         strncpy(list.names[list.count], EMBEDDED_SOUNDFONT_NAME, MAX_SOUNDFONT_NAME - 1);
+        list.names[list.count][MAX_SOUNDFONT_NAME - 1] = '\0';
         if (g_MidiSoundFont[0] == '\0' || _stricmp(g_MidiSoundFont, EMBEDDED_SOUNDFONT_NAME) == 0)
         {
             list.currentIndex = list.count;
