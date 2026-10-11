@@ -209,9 +209,9 @@ sudo apt install -y gcc-mingw-w64-i686 g++-mingw-w64-i686 binutils-mingw-w64-i68
 git clone --recurse-submodules https://github.com/Madotsukanai/th06util
 cd th06util
 
-# Place your original Touhou Koumakyou ver 1.02h executable (kouma.exe) as resources/game.exe
+# Place your original Touhou Koumakyou ver 1.02h executable (th06.exe) as resources/game.exe
 # (Required for required game data extraction and linking)
-cp /path/to/kouma.exe resources/game.exe
+cp /path/to/th06.exe resources/game.exe
 
 # Build all targets (asset extraction and parallel build)
 make
@@ -241,9 +241,9 @@ Open a Command Prompt (e.g. Developer Command Prompt for VS) and run:
 git clone --recurse-submodules https://github.com/Madotsukanai/th06util
 cd th06util
 
-:: Place your original Touhou Koumakyou ver 1.02h executable (kouma.exe) as resources\game.exe
+:: Place your original Touhou Koumakyou ver 1.02h executable (th06.exe) as resources\game.exe
 :: (Required for required game data extraction and linking)
-copy C:\path\to\kouma.exe resources\game.exe
+copy C:\path\to\th06.exe resources\game.exe
 
 :: Build all targets (th06util.exe, launcher.exe, patch, dll)
 nmake /f Nmakefile

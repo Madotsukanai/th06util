@@ -210,9 +210,9 @@ sudo apt install -y gcc-mingw-w64-i686 g++-mingw-w64-i686 binutils-mingw-w64-i68
 git clone --recurse-submodules https://github.com/Madotsukanai/th06util
 cd th06util
 
-# 東方紅魔郷 ver 1.02h の原本 (kouma.exe) を resources/game.exe として配置
+# 東方紅魔郷 ver 1.02h の原本 (東方紅魔郷.exe) を resources/game.exe として配置
 # ※ 必須ゲームデータの抽出およびコンパイル・リンクに必須です。
-cp /path/to/kouma.exe resources/game.exe
+cp /path/to/東方紅魔郷.exe resources/game.exe
 
 # ビルド (データ抽出・コンパイルが並列実行されます)
 make
@@ -242,9 +242,9 @@ Windows 上のコマンドプロンプトや Visual Studio 開発者コマンド
 git clone --recurse-submodules https://github.com/Madotsukanai/th06util
 cd th06util
 
-:: 東方紅魔郷 ver 1.02h の原本 (kouma.exe) を resources\game.exe として配置
+:: 東方紅魔郷 ver 1.02h の原本 (東方紅魔郷.exe) を resources\game.exe として配置
 :: ※ 必須ゲームデータの抽出およびコンパイル・リンクに必須です。
-copy C:\path\to\kouma.exe resources\game.exe
+copy C:\path\to\東方紅魔郷.exe resources\game.exe
 
 :: ビルド (th06util.exe, launcher.exe, patch, dll を一括ビルド)
 nmake /f Nmakefile
