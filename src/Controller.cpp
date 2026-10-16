@@ -5,6 +5,10 @@
 #include "i18n.hpp"
 #include "utils.hpp"
 
+#ifdef USE_VULKAN
+#include "platform/platform_sdl.hpp"
+#endif
+
 namespace th06
 {
 JOYCAPSA g_JoystickCaps;
@@ -315,6 +319,9 @@ u16 Controller::GetInput(void)
     u16 buttons;
 
     buttons = 0;
+#ifdef USE_VULKAN
+    buttons |= PlatformWindow::Instance().ReadInput();
+#endif
 
     if (g_Supervisor.keyboard == NULL)
     {

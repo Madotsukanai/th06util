@@ -20,6 +20,10 @@
 #include <stdio.h>
 #include <windows.h>
 
+#ifdef USE_VULKAN
+#include "renderer.hpp"
+#endif
+
 namespace th06
 {
 using th06::g_SpellPracticeBossSubId;
@@ -1145,8 +1149,8 @@ void EnemyManager::RunEclTimeline()
             case 1:
                 if (!g_Gui.BossPresent())
                 {
-                    this->SpawnEnemy(this->timelineInstr->arg0, this->timelineInstr->args.Var1AsVec(), -1, ITEM_NO_ITEM,
-                                     -1);
+                    this->SpawnEnemy(this->timelineInstr->arg0, this->timelineInstr->args.Var1AsVec(), -1,
+                                     ITEM_RANDOM_ITEM, -1);
                 }
                 break;
             case 2:
@@ -1162,7 +1166,7 @@ void EnemyManager::RunEclTimeline()
                 if (!g_Gui.BossPresent())
                 {
                     spawnedEnemy = this->SpawnEnemy(this->timelineInstr->arg0, this->timelineInstr->args.Var1AsVec(),
-                                                    -1, ITEM_NO_ITEM, -1);
+                                                    -1, ITEM_RANDOM_ITEM, -1);
                     spawnedEnemy->flags.unk4 = 1;
                 }
                 break;
@@ -1203,7 +1207,7 @@ void EnemyManager::RunEclTimeline()
                     {
                         pos2.z = g_Rng.GetRandomF32InRange(800.0f);
                     }
-                    this->SpawnEnemy(this->timelineInstr->arg0, &pos2, -1, ITEM_NO_ITEM, -1);
+                    this->SpawnEnemy(this->timelineInstr->arg0, &pos2, -1, ITEM_RANDOM_ITEM, -1);
                 }
                 break;
             case 6:
@@ -1244,7 +1248,7 @@ void EnemyManager::RunEclTimeline()
                     {
                         pos4.z = g_Rng.GetRandomF32InRange(800.0f);
                     }
-                    spawnedEnemy = this->SpawnEnemy(this->timelineInstr->arg0, &pos4, -1, ITEM_NO_ITEM, -1);
+                    spawnedEnemy = this->SpawnEnemy(this->timelineInstr->arg0, &pos4, -1, ITEM_RANDOM_ITEM, -1);
                     spawnedEnemy->flags.unk4 = 1;
                 }
                 break;
@@ -1669,7 +1673,7 @@ ChainCallbackResult EnemyManager::OnUpdate(EnemyManager *mgr)
                         g_EffectManager.SpawnParticles(curEnemy->deathAnm2 + 4, &curEnemy->position, 3, 0xffffffff);
                         g_ItemManager.SpawnItem(&curEnemy->position, (ItemType)curEnemy->itemDrop, local_8);
                     }
-                    else if (curEnemy->itemDrop == ITEM_NO_ITEM)
+                    else if (curEnemy->itemDrop == ITEM_RANDOM_ITEM)
                     {
                         if (mgr->randomItemSpawnIndex % 3 == 0)
                         {
@@ -1803,7 +1807,97 @@ static void DrawRing(float r_in, float r_out, float start_angle, float end_angle
         vertices[2 * i + 1].color = color;
     }
 
+#ifdef USE_VULKAN
+    extern D3DXMATRIX g_currentBossWorld;
+    for (int i = 0; i < segments; i++)
+    {
+        Vertex3D q[4];
+        q[0] = { vertices[2 * i].x, vertices[2 * i].y, vertices[2 * i].z, 0.0f, 0.0f, vertices[2 * i].color };
+        q[1] = { vertices[2 * i + 1].x, vertices[2 * i + 1].y, vertices[2 * i + 1].z, 1.0f, 0.0f, vertices[2 * i + 1].color };
+        q[2] = { vertices[2 * (i + 1)].x, vertices[2 * (i + 1)].y, vertices[2 * (i + 1)].z, 0.0f, 1.0f, vertices[2 * (i + 1)].color };
+        q[3] = { vertices[2 * (i + 1) + 1].x, vertices[2 * (i + 1) + 1].y, vertices[2 * (i + 1) + 1].z, 1.0f, 1.0f, vertices[2 * (i + 1) + 1].color };
+        g_Renderer->DrawQuad3D((const float *)&g_currentBossWorld, g_Renderer->GetWhiteTexture(), q, BLEND_ALPHA);
+    }
+#else
     g_Supervisor.d3dDevice->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2 * segments, vertices, sizeof(HPBarVertex));
+#endif
+}
+
+struct ContactBoxVertex
+{
+    float x, y, z, rhw;
+    D3DCOLOR color;
+};
+
+static void DrawEnemyContactBoxes(EnemyManager *mgr)
+{
+    if (!g_HitDisp)
+        return;
+
+    const f32 ox = g_GameManager.arcadeRegionTopLeftPos.x;
+    const f32 oy = g_GameManager.arcadeRegionTopLeftPos.y;
+    const D3DCOLOR col = 0xffff0000;
+
+    DWORD oldZWrite, oldZFunc, oldAlpha, oldSrc, oldDest, oldVS;
+    IDirect3DBaseTexture8 *oldTex = NULL;
+    g_Supervisor.d3dDevice->GetTexture(0, &oldTex);
+    g_Supervisor.d3dDevice->GetVertexShader(&oldVS);
+    g_Supervisor.d3dDevice->GetRenderState(D3DRS_ZWRITEENABLE, &oldZWrite);
+    g_Supervisor.d3dDevice->GetRenderState(D3DRS_ZFUNC, &oldZFunc);
+    g_Supervisor.d3dDevice->GetRenderState(D3DRS_ALPHABLENDENABLE, &oldAlpha);
+    g_Supervisor.d3dDevice->GetRenderState(D3DRS_SRCBLEND, &oldSrc);
+    g_Supervisor.d3dDevice->GetRenderState(D3DRS_DESTBLEND, &oldDest);
+
+    g_Supervisor.d3dDevice->SetTexture(0, NULL);
+    g_Supervisor.d3dDevice->SetVertexShader(D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+    g_Supervisor.d3dDevice->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+    g_Supervisor.d3dDevice->SetRenderState(D3DRS_ZFUNC, D3DCMP_ALWAYS);
+    g_Supervisor.d3dDevice->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    g_Supervisor.d3dDevice->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    g_Supervisor.d3dDevice->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+
+    for (i32 i = 0; i < mgr->enemyCount; i++)
+    {
+        Enemy *e = &mgr->enemies[i];
+        if (!e->flags.unk5 || !e->flags.unk8 || e->flags.unk15)
+            continue;
+
+        f32 hw = e->hitboxDimensions.x / 1.5f / 2.0f;
+        f32 hh = e->hitboxDimensions.y / 1.5f / 2.0f;
+        f32 cx = ox + e->position.x;
+        f32 cy = oy + e->position.y;
+
+        ContactBoxVertex v[5] = {
+            {cx - hw, cy - hh, 0.0f, 1.0f, col}, {cx + hw, cy - hh, 0.0f, 1.0f, col},
+            {cx + hw, cy + hh, 0.0f, 1.0f, col}, {cx - hw, cy + hh, 0.0f, 1.0f, col},
+            {cx - hw, cy - hh, 0.0f, 1.0f, col},
+        };
+        g_Supervisor.d3dDevice->DrawPrimitiveUP(D3DPT_LINESTRIP, 4, v, sizeof(ContactBoxVertex));
+    }
+
+    g_Supervisor.d3dDevice->SetRenderState(D3DRS_ZWRITEENABLE, oldZWrite);
+    g_Supervisor.d3dDevice->SetRenderState(D3DRS_ZFUNC, oldZFunc);
+    g_Supervisor.d3dDevice->SetRenderState(D3DRS_ALPHABLENDENABLE, oldAlpha);
+    g_Supervisor.d3dDevice->SetRenderState(D3DRS_SRCBLEND, oldSrc);
+    g_Supervisor.d3dDevice->SetRenderState(D3DRS_DESTBLEND, oldDest);
+    g_Supervisor.d3dDevice->SetVertexShader(oldVS);
+    if (oldTex)
+    {
+        g_Supervisor.d3dDevice->SetTexture(0, oldTex);
+        oldTex->Release();
+    }
+
+    // DrawPrimitiveUP above unbinds stream 0 (AnmManager's shared vertex buffer).
+    // AnmManager::Draw2/Draw3 skip SetStreamSource while their cached state
+    // (current sprite / vertex shader) still matches, and this runs before the
+    // player, effect and bullet draws, so without invalidating the cache those
+    // sprites are drawn with no vertex buffer and disappear.
+    g_AnmManager->SetCurrentSprite(NULL);
+    g_AnmManager->SetCurrentTexture(NULL);
+    g_AnmManager->SetCurrentVertexShader(0xff);
+    g_AnmManager->SetCurrentColorOp(0xff);
+    g_AnmManager->SetCurrentBlendMode(0xff);
+    g_AnmManager->SetCurrentZWriteDisable(0xff);
 }
 
 static i32 s_SpellcardLifeThresholds[16];
@@ -1870,7 +1964,18 @@ static void DrawBossEnemyMarker(f32 bossGameX, D3DCOLOR color)
         v[i + 1].rhw = 1.f;
         v[i + 1].c = color;
     }
+#ifdef USE_VULKAN
+    {
+        Vertex2D v2d[SEGMENTS + 2];
+        for (i32 i = 0; i < SEGMENTS + 2; i++)
+        {
+            v2d[i] = { v[i].x, v[i].y, 0.0f, 0.0f, v[i].c };
+        }
+        g_Renderer->DrawTriangleFan2D(g_Renderer->GetWhiteTexture(), v2d, SEGMENTS + 2, BLEND_ALPHA);
+    }
+#else
     g_Supervisor.d3dDevice->DrawPrimitiveUP(D3DPT_TRIANGLEFAN, SEGMENTS, v, sizeof(RHW));
+#endif
 
     g_Supervisor.d3dDevice->SetTexture(0, oldTex);
     if (oldTex)
@@ -1890,6 +1995,10 @@ static void DrawBossEnemyMarker(f32 bossGameX, D3DCOLOR color)
     g_AnmManager->SetCurrentZWriteDisable(0xff);
 }
 
+#ifdef USE_VULKAN
+D3DXMATRIX g_currentBossWorld;
+#endif
+
 static void DrawBossHpCircle(Enemy *boss)
 {
     D3DXMATRIX origWorld;
@@ -1904,6 +2013,9 @@ static void DrawBossHpCircle(Enemy *boss)
 
     D3DXMATRIX matTranslate;
     D3DXMatrixTranslation(&matTranslate, boss->position.x, -boss->position.y, 0.495f);
+#ifdef USE_VULKAN
+    g_currentBossWorld = matTranslate;
+#endif
     g_Supervisor.d3dDevice->SetTransform(D3DTS_WORLD, &matTranslate);
 
     g_Supervisor.d3dDevice->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
@@ -2710,6 +2822,8 @@ ChainCallbackResult EnemyManager::OnDraw(EnemyManager *mgr)
             }
         }
     }
+
+    DrawEnemyContactBoxes(mgr);
 
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }

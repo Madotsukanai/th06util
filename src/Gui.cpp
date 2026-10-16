@@ -20,6 +20,10 @@
 #include "ZunColor.hpp"
 #include "utils.hpp"
 
+#ifdef USE_VULKAN
+#include "renderer.hpp"
+#endif
+
 namespace th06
 {
 extern ReplayManager *g_ReplayManager;
@@ -596,6 +600,15 @@ static void DrawDifficultyLabel(const RECT &r)
 
 static void DrawInputRect(float x, float y, float w, float h, D3DCOLOR col)
 {
+#ifdef USE_VULKAN
+    Vertex2D v2d[4];
+    v2d[0] = { x, y, 0.0f, 0.0f, col };
+    v2d[1] = { x + w, y, 1.0f, 0.0f, col };
+    v2d[2] = { x, y + h, 0.0f, 1.0f, col };
+    v2d[3] = { x + w, y + h, 1.0f, 1.0f, col };
+    g_Renderer->DrawColoredQuad2D(v2d, BLEND_ALPHA);
+    return;
+#else
     struct RHWVertex
     {
         float x, y, z, rhw;
@@ -626,6 +639,7 @@ static void DrawInputRect(float x, float y, float w, float h, D3DCOLOR col)
     g_Supervisor.d3dDevice->SetVertexShader(D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
     g_Supervisor.d3dDevice->SetTexture(0, NULL);
     g_Supervisor.d3dDevice->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, v, sizeof(RHWVertex));
+#endif
 }
 
 static void DrawInputCross(float bx, float by, float s, float gap, u16 inp)
@@ -1240,7 +1254,15 @@ ZunResult GuiImpl::DrawDialogue()
         g_Supervisor.d3dDevice->SetRenderState(D3DRS_ZWRITEENABLE, 0);
     }
     g_Supervisor.d3dDevice->SetVertexShader(D3DFVF_DIFFUSE | D3DFVF_XYZRHW);
+#ifdef USE_VULKAN
+    Vertex2D v2d[4];
+    for (int i = 0; i < 4; i++) {
+        v2d[i] = { vertices[i].position.x, vertices[i].position.y, 0.0f, 0.0f, vertices[i].diffuse };
+    }
+    g_Renderer->DrawColoredQuad2D(v2d, BLEND_ALPHA);
+#else
     g_Supervisor.d3dDevice->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, vertices, sizeof(vertices[0]));
+#endif
     g_AnmManager->SetCurrentVertexShader(0xff);
     g_AnmManager->SetCurrentColorOp(0xff);
     g_AnmManager->SetCurrentBlendMode(0xff);
@@ -1613,7 +1635,15 @@ void Gui::DrawGameScene()
                 g_Supervisor.d3dDevice->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
             }
             g_Supervisor.d3dDevice->SetVertexShader(D3DFVF_DIFFUSE | D3DFVF_XYZRHW);
+#ifdef USE_VULKAN
+            Vertex2D v2d[4];
+            for (int i = 0; i < 4; i++) {
+                v2d[i] = { vertices[i].position.x, vertices[i].position.y, 0.0f, 0.0f, vertices[i].diffuse };
+            }
+            g_Renderer->DrawColoredQuad2D(v2d, BLEND_ALPHA);
+#else
             g_Supervisor.d3dDevice->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, vertices, sizeof(VertexDiffuseXyzrwh));
+#endif
             g_AnmManager->SetCurrentVertexShader(0xff);
             g_AnmManager->SetCurrentColorOp(0xff);
             g_AnmManager->SetCurrentBlendMode(0xff);

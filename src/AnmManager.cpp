@@ -11,6 +11,10 @@
 
 #include <stdio.h>
 
+#ifdef USE_VULKAN
+#include "renderer.hpp"
+#endif
+
 namespace th06
 {
 VertexTex1Xyzrwh g_PrimitivesToDrawVertexBuf[4];
@@ -166,6 +170,17 @@ ZunResult AnmManager::LoadTexture(i32 textureIdx, char *textureName, i32 texture
         return ZUN_ERROR;
     }
 
+#ifdef USE_VULKAN
+    {
+        TextureHandle handle = g_Renderer->CreateTextureFromMemory(this->imageDataArray[textureIdx], g_LastFileSize, colorKey);
+        this->textures[textureIdx] = (IDirect3DTexture8 *)(uintptr_t)handle;
+        if (handle == INVALID_TEXTURE)
+        {
+            return ZUN_ERROR;
+        }
+    }
+    return ZUN_SUCCESS;
+#else
     if (D3DXCreateTextureFromFileInMemoryEx(g_Supervisor.d3dDevice, this->imageDataArray[textureIdx], g_LastFileSize, 0,
                                             0, 0, 0, g_TextureFormatD3D8Mapping[textureFormat], D3DPOOL_MANAGED,
                                             D3DX_FILTER_NONE | D3DX_FILTER_POINT, D3DX_DEFAULT, colorKey, NULL, NULL,
@@ -175,6 +190,7 @@ ZunResult AnmManager::LoadTexture(i32 textureIdx, char *textureName, i32 texture
     }
 
     return ZUN_SUCCESS;
+#endif
 }
 
 ZunResult AnmManager::LoadTextureAlphaChannel(i32 textureIdx, char *textureName, i32 textureFormat, D3DCOLOR colorKey)
@@ -222,6 +238,42 @@ ZunResult AnmManager::LoadTextureAlphaChannel(i32 textureIdx, char *textureName,
         return ZUN_ERROR;
     }
 
+#ifdef USE_VULKAN
+    {
+        TextureHandle srcTex = g_Renderer->CreateTextureFromMemory(data, g_LastFileSize, colorKey);
+        TextureHandle dstTex = (TextureHandle)(uintptr_t)this->textures[textureIdx];
+        free(data);
+        data = NULL;
+
+        if (srcTex == INVALID_TEXTURE || dstTex == INVALID_TEXTURE)
+        {
+            if (srcTex != INVALID_TEXTURE)
+            {
+                g_Renderer->ReleaseTexture(srcTex);
+            }
+            return ZUN_ERROR;
+        }
+
+        SurfaceDesc srcDesc;
+        SurfaceDesc dstDesc;
+        if (g_Renderer->LockTexture(srcTex, &srcDesc) && g_Renderer->LockTexture(dstTex, &dstDesc))
+        {
+            u8 *srcPixels = (u8 *)srcDesc.pixels;
+            u8 *dstPixels = (u8 *)dstDesc.pixels;
+            u32 pixelCount = dstDesc.width * dstDesc.height;
+            for (u32 i = 0; i < pixelCount; i++)
+            {
+                // The original copies the source blue channel into the
+                // destination alpha channel (see the D3D path below).
+                dstPixels[i * 4 + 3] = srcPixels[i * 4 + 0];
+            }
+        }
+        g_Renderer->UnlockTexture(srcTex);
+        g_Renderer->UnlockTexture(dstTex);
+        g_Renderer->ReleaseTexture(srcTex);
+        return ZUN_SUCCESS;
+    }
+#else
     this->textures[textureIdx]->GetLevelDesc(0, &surfaceDesc);
 
     if (surfaceDesc.Format != D3DFMT_A8R8G8B8 && surfaceDesc.Format != D3DFMT_A4R4G4B4 &&
@@ -308,12 +360,17 @@ err:
 
     free(data);
     return ZUN_ERROR;
+#endif
 }
 
 ZunResult AnmManager::CreateEmptyTexture(i32 textureIdx, u32 width, u32 height, i32 textureFormat)
 {
+#ifdef USE_VULKAN
+    this->textures[textureIdx] = (IDirect3DTexture8 *)(uintptr_t)g_Renderer->CreateTexture(width, height);
+#else
     D3DXCreateTexture(g_Supervisor.d3dDevice, width, height, 1, 0, g_TextureFormatD3D8Mapping[textureFormat],
                       D3DPOOL_MANAGED, this->textures + textureIdx);
+#endif
 
     return ZUN_SUCCESS;
 }
@@ -426,7 +483,11 @@ void AnmManager::ReleaseTexture(i32 textureIdx)
 {
     if (this->textures[textureIdx] != NULL)
     {
+#ifdef USE_VULKAN
+        g_Renderer->ReleaseTexture((TextureHandle)(uintptr_t)this->textures[textureIdx]);
+#else
         this->textures[textureIdx]->Release();
+#endif
         this->textures[textureIdx] = NULL;
     }
 
@@ -632,6 +693,20 @@ ZunResult AnmManager::DrawInner(AnmVm *vm, i32 param_3)
         }
         this->currentVertexShader = 2;
     }
+#ifdef USE_VULKAN
+    Vertex2D v2d[4];
+    for (int i = 0; i < 4; i++) {
+        v2d[i].x = g_PrimitivesToDrawVertexBuf[i].position.x;
+        v2d[i].y = g_PrimitivesToDrawVertexBuf[i].position.y;
+        v2d[i].u = g_PrimitivesToDrawVertexBuf[i].textureUV.x;
+        v2d[i].v = g_PrimitivesToDrawVertexBuf[i].textureUV.y;
+        v2d[i].color = vm->color;
+    }
+    BlendMode blend = (vm->flags.blendMode == AnmVmBlendMode_InvSrcAlpha) ? BLEND_ALPHA : BLEND_ADD;
+    TextureHandle tex = (TextureHandle)(uintptr_t)this->textures[vm->sprite->sourceFileIndex];
+    g_Renderer->DrawQuad2D(tex, v2d, blend);
+    return ZUN_SUCCESS;
+#else
     this->SetRenderStateForVm(vm);
     if (((g_Supervisor.cfg.opts >> GCOS_DONT_USE_VERTEX_BUF) & 1) == 0)
     {
@@ -662,6 +737,7 @@ ZunResult AnmManager::DrawInner(AnmVm *vm, i32 param_3)
         g_Supervisor.d3dDevice->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, g_PrimitivesToDrawNoVertexBuf, 0x1c);
     }
     return ZUN_SUCCESS;
+#endif
 }
 
 ZunResult AnmManager::DrawNoRotation(AnmVm *vm)
@@ -915,6 +991,18 @@ ZunResult AnmManager::Draw3(AnmVm *vm)
         this->currentVertexShader = 3;
     }
 
+#ifdef USE_VULKAN
+    Vertex3D v3d[4];
+    v3d[0] = { -128.0f, -128.0f, 0.0f, vm->sprite->uvStart.x + vm->uvScrollPos.x, vm->sprite->uvStart.y + vm->uvScrollPos.y, vm->color };
+    v3d[1] = {  128.0f, -128.0f, 0.0f, vm->sprite->uvEnd.x   + vm->uvScrollPos.x, vm->sprite->uvStart.y + vm->uvScrollPos.y, vm->color };
+    v3d[2] = { -128.0f,  128.0f, 0.0f, vm->sprite->uvStart.x + vm->uvScrollPos.x, vm->sprite->uvEnd.y   + vm->uvScrollPos.y, vm->color };
+    v3d[3] = {  128.0f,  128.0f, 0.0f, vm->sprite->uvEnd.x   + vm->uvScrollPos.x, vm->sprite->uvEnd.y   + vm->uvScrollPos.y, vm->color };
+
+    BlendMode blend = (vm->flags.blendMode == AnmVmBlendMode_InvSrcAlpha) ? BLEND_ALPHA : BLEND_ADD;
+    TextureHandle tex = (TextureHandle)(uintptr_t)this->textures[vm->sprite->sourceFileIndex];
+    g_Renderer->DrawQuad3D((const float*)&worldTransformMatrix, tex, v3d, blend);
+    return ZUN_SUCCESS;
+#else
     this->SetRenderStateForVm(vm);
 
     if ((g_Supervisor.cfg.opts >> GCOS_DONT_USE_VERTEX_BUF & 1) == 0)
@@ -926,6 +1014,7 @@ ZunResult AnmManager::Draw3(AnmVm *vm)
         g_Supervisor.d3dDevice->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, g_PrimitivesToDrawUnknown, 0x18);
     }
     return ZUN_SUCCESS;
+#endif
 }
 
 ZunResult AnmManager::Draw2(AnmVm *vm)
@@ -995,6 +1084,18 @@ ZunResult AnmManager::Draw2(AnmVm *vm)
             this->currentVertexShader = 3;
         }
     }
+#ifdef USE_VULKAN
+    Vertex3D v3d[4];
+    v3d[0] = { -128.0f, -128.0f, 0.0f, vm->sprite->uvStart.x + vm->uvScrollPos.x, vm->sprite->uvStart.y + vm->uvScrollPos.y, vm->color };
+    v3d[1] = {  128.0f, -128.0f, 0.0f, vm->sprite->uvEnd.x   + vm->uvScrollPos.x, vm->sprite->uvStart.y + vm->uvScrollPos.y, vm->color };
+    v3d[2] = { -128.0f,  128.0f, 0.0f, vm->sprite->uvStart.x + vm->uvScrollPos.x, vm->sprite->uvEnd.y   + vm->uvScrollPos.y, vm->color };
+    v3d[3] = {  128.0f,  128.0f, 0.0f, vm->sprite->uvEnd.x   + vm->uvScrollPos.x, vm->sprite->uvEnd.y   + vm->uvScrollPos.y, vm->color };
+
+    BlendMode blend = (vm->flags.blendMode == AnmVmBlendMode_InvSrcAlpha) ? BLEND_ALPHA : BLEND_ADD;
+    TextureHandle tex = (TextureHandle)(uintptr_t)this->textures[vm->sprite->sourceFileIndex];
+    g_Renderer->DrawQuad3D((const float*)&worldTransformMatrix, tex, v3d, blend);
+    return ZUN_SUCCESS;
+#else
     this->SetRenderStateForVm(vm);
     if ((g_Supervisor.cfg.opts >> GCOS_DONT_USE_VERTEX_BUF & 1) == 0)
     {
@@ -1005,6 +1106,7 @@ ZunResult AnmManager::Draw2(AnmVm *vm)
         g_Supervisor.d3dDevice->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, g_PrimitivesToDrawUnknown, 0x18);
     }
     return ZUN_SUCCESS;
+#endif
 }
 
 i32 AnmManager::ExecuteScript(AnmVm *vm)

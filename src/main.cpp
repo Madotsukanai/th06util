@@ -21,6 +21,11 @@
 #include "utils.hpp"
 #include <signal.h>
 
+#ifdef USE_VULKAN
+#include "platform_sdl.hpp"
+#include "renderer.hpp"
+#endif
+
 using namespace th06;
 
 static void MidiResetAtExit()
@@ -188,6 +193,13 @@ restart:
 
     while (!g_GameWindow.isAppClosing)
     {
+#ifdef USE_VULKAN
+        if (!PlatformWindow::Instance().PollEvents())
+        {
+            g_GameWindow.isAppClosing = 1;
+            break;
+        }
+#endif
         if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
         {
             TranslateMessage(&msg);
@@ -242,6 +254,16 @@ stop:
         g_Supervisor.d3dDevice->Release();
         g_Supervisor.d3dDevice = NULL;
     }
+
+#ifdef USE_VULKAN
+    if (g_Renderer)
+    {
+        g_Renderer->Shutdown();
+        delete g_Renderer;
+        g_Renderer = nullptr;
+    }
+    PlatformWindow::Instance().Shutdown();
+#endif
 
     ShowWindow(g_GameWindow.window, 0);
     MoveWindow(g_GameWindow.window, 0, 0, 0, 0, 0);

@@ -98,6 +98,7 @@
 #define TH_JP_MD_DAT_FILE "紅魔郷MD.dat"
 #define TH_JP_ST_DAT_FILE "紅魔郷ST.dat"
 #define TH_JP_TL_DAT_FILE "紅魔郷TL.dat"
+#define TH_JP_STATS_ACTUAL_DEATHS_FMT "（実ミス数：%d）"
 
 // EN
 #define TH_EN_CONFIG_FILE "th06.cfg"
@@ -194,6 +195,7 @@
 #define TH_EN_MD_DAT_FILE "KOUMAKYO_MD.dat"
 #define TH_EN_ST_DAT_FILE "KOUMAKYO_ST.dat"
 #define TH_EN_TL_DAT_FILE "KOUMAKYO_TL.dat"
+#define TH_EN_STATS_ACTUAL_DEATHS_FMT "(Actual: %d)"
 #define TH_CONCAT_HELPER(x, y) x##y
 
 #define TH_MAKE_LANG_STR(lang, id) TH_CONCAT_HELPER(lang, id)
@@ -287,6 +289,7 @@
 #define TH_MD_DAT_FILE TH_MAKE_LANG_STR(TH_LANG, _MD_DAT_FILE)
 #define TH_ST_DAT_FILE TH_MAKE_LANG_STR(TH_LANG, _ST_DAT_FILE)
 #define TH_TL_DAT_FILE TH_MAKE_LANG_STR(TH_LANG, _TL_DAT_FILE)
+#define TH_STATS_ACTUAL_DEATHS_FMT TH_MAKE_LANG_STR(TH_LANG, _STATS_ACTUAL_DEATHS_FMT)
 
 #define TH_SONG_NAME "♪%s"
 #define TH_FONT_NAME "ＭＳ ゴシック"

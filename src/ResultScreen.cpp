@@ -705,6 +705,14 @@ static void ReturnToStatsScreen(ResultScreen *rs, bool playSound)
         rs->unk_40[idx].pendingInterrupt = 2;
     }
     strcpy(rs->replayName, rs->hscr.name);
+
+    i32 actualDeaths = g_GameManager.deaths - g_DeathbombCount;
+    if (actualDeaths < 0)
+    {
+        actualDeaths = 0;
+    }
+    AnmManager::DrawVmTextFmt(g_AnmManager, &rs->unk_28a0[15], COLOR_RGB(COLOR_WHITE), COLOR_RGB(COLOR_BLACK),
+                              TH_STATS_ACTUAL_DEATHS_FMT, actualDeaths);
 }
 
 i32 ResultScreen::HandleResultKeyboard()
@@ -1327,6 +1335,12 @@ u32 ResultScreen::DrawFinalStats()
 
         g_AsciiManager.AddFormatText(&strPos, "%9d", g_GameManager.deaths);
 
+        this->unk_28a0[15].pos = strPos;
+        this->unk_28a0[15].pos.x += 130.0f;
+        this->unk_28a0[15].pos.y += 1.0f;
+        this->unk_28a0[15].color = color;
+        g_AnmManager->DrawNoRotation(&this->unk_28a0[15]);
+
         unknownFloat -= g_GameManager.deaths * 5.0f - 10.0f;
 
         strPos.y += 22.0f;
@@ -1802,6 +1816,16 @@ ChainCallbackResult ResultScreen::OnUpdate(ResultScreen *resultScreen)
         break;
 
     case RESULT_SCREEN_STATE_STATS_SCREEN:
+        if (resultScreen->frameTimer == 0)
+        {
+            i32 actualDeaths = g_GameManager.deaths - g_DeathbombCount;
+            if (actualDeaths < 0)
+            {
+                actualDeaths = 0;
+            }
+            AnmManager::DrawVmTextFmt(g_AnmManager, &resultScreen->unk_28a0[15], COLOR_RGB(COLOR_WHITE),
+                                      COLOR_RGB(COLOR_BLACK), TH_STATS_ACTUAL_DEATHS_FMT, actualDeaths);
+        }
     case RESULT_SCREEN_STATE_STATS_TO_SAVE_TRANSITION:
         resultScreen->CheckConfirmButton();
         break;

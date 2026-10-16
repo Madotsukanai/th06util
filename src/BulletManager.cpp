@@ -658,7 +658,8 @@ static void DrawBulletHitboxes(BulletManager *mgr)
         DWORD color;
     };
 
-    DWORD oldLighting, oldAlpha, oldZ, oldColorOp, oldAlphaOp, oldColorArg1, oldAlphaArg1, oldVertexShader;
+    DWORD oldLighting, oldAlpha, oldSrc, oldDest, oldZ, oldZWrite, oldZFunc;
+    DWORD oldColorOp, oldAlphaOp, oldColorArg1, oldAlphaArg1, oldVertexShader;
     IDirect3DBaseTexture8 *oldTexture = NULL;
     IDirect3DDevice8 *dev = g_Supervisor.d3dDevice;
 
@@ -666,7 +667,11 @@ static void DrawBulletHitboxes(BulletManager *mgr)
     dev->GetVertexShader(&oldVertexShader);
     dev->GetRenderState(D3DRS_LIGHTING, &oldLighting);
     dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &oldAlpha);
+    dev->GetRenderState(D3DRS_SRCBLEND, &oldSrc);
+    dev->GetRenderState(D3DRS_DESTBLEND, &oldDest);
     dev->GetRenderState(D3DRS_ZENABLE, &oldZ);
+    dev->GetRenderState(D3DRS_ZWRITEENABLE, &oldZWrite);
+    dev->GetRenderState(D3DRS_ZFUNC, &oldZFunc);
     dev->GetTextureStageState(0, D3DTSS_COLOROP, &oldColorOp);
     dev->GetTextureStageState(0, D3DTSS_ALPHAOP, &oldAlphaOp);
     dev->GetTextureStageState(0, D3DTSS_COLORARG1, &oldColorArg1);
@@ -679,8 +684,12 @@ static void DrawBulletHitboxes(BulletManager *mgr)
     dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
     dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
     dev->SetRenderState(D3DRS_LIGHTING, FALSE);
-    dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
     dev->SetRenderState(D3DRS_ZENABLE, FALSE);
+    dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+    dev->SetRenderState(D3DRS_ZFUNC, D3DCMP_ALWAYS);
 
     Bullet *bullet = &mgr->bullets[0];
     for (i32 idx = 0; idx < ARRAY_SIZE_SIGNED(mgr->bullets); idx++, bullet++)
@@ -744,9 +753,7 @@ static void DrawBulletHitboxes(BulletManager *mgr)
 
     dev->SetTexture(0, oldTexture);
     if (oldTexture != NULL)
-    {
         oldTexture->Release();
-    }
     dev->SetVertexShader(oldVertexShader);
     dev->SetTextureStageState(0, D3DTSS_COLOROP, oldColorOp);
     dev->SetTextureStageState(0, D3DTSS_ALPHAOP, oldAlphaOp);
@@ -754,7 +761,23 @@ static void DrawBulletHitboxes(BulletManager *mgr)
     dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, oldAlphaArg1);
     dev->SetRenderState(D3DRS_LIGHTING, oldLighting);
     dev->SetRenderState(D3DRS_ALPHABLENDENABLE, oldAlpha);
+    dev->SetRenderState(D3DRS_SRCBLEND, oldSrc);
+    dev->SetRenderState(D3DRS_DESTBLEND, oldDest);
     dev->SetRenderState(D3DRS_ZENABLE, oldZ);
+    dev->SetRenderState(D3DRS_ZWRITEENABLE, oldZWrite);
+    dev->SetRenderState(D3DRS_ZFUNC, oldZFunc);
+
+    // DrawPrimitiveUP above unbinds stream 0 (AnmManager's shared vertex buffer),
+    // but AnmManager::Draw2/Draw3 skip SetStreamSource when their cached state
+    // (current sprite / vertex shader) still matches, so without this the bullets
+    // drawn afterwards (next frame) render with no vertex buffer and vanish.
+    // Invalidate the cache so the next draw re-binds everything.
+    g_AnmManager->SetCurrentSprite(NULL);
+    g_AnmManager->SetCurrentTexture(NULL);
+    g_AnmManager->SetCurrentVertexShader(0xff);
+    g_AnmManager->SetCurrentColorOp(0xff);
+    g_AnmManager->SetCurrentBlendMode(0xff);
+    g_AnmManager->SetCurrentZWriteDisable(0xff);
 }
 
 ChainCallbackResult BulletManager::OnUpdate(BulletManager *mgr)

@@ -18,6 +18,14 @@
 #include <emmintrin.h>
 #include <imm.h>
 
+#ifdef USE_VULKAN
+#include "platform_sdl.hpp"
+#include "renderer.hpp"
+#include "vulkan_renderer.hpp"
+#include "dummy_d3d8.hpp"
+#include <SDL2/SDL_syswm.h>
+#endif
+
 namespace th06
 {
 GameWindow g_GameWindow;
@@ -348,7 +356,12 @@ RenderResult GameWindow::Render()
 
     if (shouldRenderAndPresent && g_Supervisor.cfg.frameskipConfig <= this->curFrame)
     {
-
+#ifdef USE_VULKAN
+        g_Renderer->BeginScene();
+        g_Renderer->Clear(0x00000000, true);
+        g_Chain.RunDrawChain();
+        g_Renderer->EndScene();
+#else
         {
             bool nowInGame = (g_Supervisor.curState == SUPERVISOR_STATE_GAMEMANAGER);
             if (nowInGame != s_lastFrameWasInGame)
@@ -417,6 +430,7 @@ RenderResult GameWindow::Render()
             g_Supervisor.d3dDevice->EndScene();
             g_Supervisor.d3dDevice->SetTexture(0, NULL);
         }
+#endif
     }
 
     {
@@ -524,6 +538,10 @@ RenderResult GameWindow::Render()
 
 void GameWindow::Present()
 {
+#ifdef USE_VULKAN
+    g_Renderer->Present();
+    return;
+#else
     RECT sourceRect;
     RECT destRect;
     i32 unused;
@@ -1030,10 +1048,15 @@ void GameWindow::Present()
         g_Supervisor.unk198--;
     }
     return;
+#endif
 }
 
 i32 GameWindow::InitD3dInterface(void)
 {
+#ifdef USE_VULKAN
+    g_Supervisor.d3dIface = GetDummyD3D();
+    return 0;
+#else
     g_Supervisor.d3dIface = Direct3DCreate8(D3D_SDK_VERSION);
 
     if (g_Supervisor.d3dIface == NULL)
@@ -1042,10 +1065,34 @@ i32 GameWindow::InitD3dInterface(void)
         return 1;
     }
     return 0;
+#endif
 }
 
 void GameWindow::CreateGameWindow(HINSTANCE hInstance)
 {
+#ifdef USE_VULKAN
+    WindowConfig cfg;
+    cfg.width = GAME_WINDOW_WIDTH;
+    cfg.height = GAME_WINDOW_HEIGHT;
+    cfg.fullscreen = (g_Supervisor.cfg.windowed == 0);
+    cfg.title = TH_WINDOW_TITLE;
+    if (!PlatformWindow::Instance().Initialize(cfg))
+    {
+        g_GameErrorContext.Fatal("Failed to initialize SDL window");
+        return;
+    }
+    SDL_SysWMinfo wmInfo;
+    SDL_VERSION(&wmInfo.version);
+    if (SDL_GetWindowWMInfo(PlatformWindow::Instance().GetWindow(), &wmInfo))
+    {
+        g_GameWindow.window = wmInfo.info.win.window;
+    }
+    g_Supervisor.hwndGameWindow = g_GameWindow.window;
+    g_GameWindow.isAppActive = 1;
+    g_ShouldClearLetterbox = 1;
+    g_ResetDeviceOnResume = 0;
+    return;
+#else
     WNDCLASS base_class;
     RECT fullscreenRect;
     DWORD windowedStyle;
@@ -1108,6 +1155,7 @@ void GameWindow::CreateGameWindow(HINSTANCE hInstance)
     }
     g_Supervisor.hwndGameWindow = g_GameWindow.window;
     ImmAssociateContext(g_GameWindow.window, NULL);
+#endif
 }
 
 void GameWindow::ApplyWindowMode()
@@ -1298,6 +1346,47 @@ LRESULT __stdcall GameWindow::WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
 
 i32 GameWindow::InitD3dRendering(void)
 {
+#ifdef USE_VULKAN
+    if (!g_Renderer)
+    {
+        g_Renderer = new VulkanRenderer();
+    }
+    if (!g_Renderer->Initialize(PlatformWindow::Instance().GetWindow(),
+                                GAME_WINDOW_WIDTH, GAME_WINDOW_HEIGHT,
+                                (g_Supervisor.cfg.windowed == 0)))
+    {
+        g_GameErrorContext.Fatal("Failed to initialize VulkanRenderer");
+        return 1;
+    }
+    g_Supervisor.d3dDevice = GetDummyD3DDevice();
+
+    float half_width = (float)GAME_WINDOW_WIDTH / 2.0f;
+    float half_height = (float)GAME_WINDOW_HEIGHT / 2.0f;
+    float aspect_ratio = (float)GAME_WINDOW_WIDTH / (float)GAME_WINDOW_HEIGHT;
+    float field_of_view_y = 0.52359879f; // PI / 6.0f
+    float camera_distance = half_height / tanf(field_of_view_y / 2.0f);
+    D3DXVECTOR3 up(0.0f, 1.0f, 0.0f);
+    D3DXVECTOR3 at(half_width, -half_height, 0.0f);
+    D3DXVECTOR3 eye(half_width, -half_height, -camera_distance);
+    D3DXMatrixLookAtLH(&g_Supervisor.viewMatrix, &eye, &at, &up);
+    D3DXMatrixPerspectiveFovLH(&g_Supervisor.projectionMatrix, field_of_view_y, aspect_ratio, 100.0f, 10000.0f);
+    g_Renderer->SetCamera3D((const float*)&g_Supervisor.viewMatrix, (const float*)&g_Supervisor.projectionMatrix);
+
+    g_Supervisor.viewport.X = 0;
+    g_Supervisor.viewport.Y = 0;
+    g_Supervisor.viewport.Width = GAME_WINDOW_WIDTH;
+    g_Supervisor.viewport.Height = GAME_WINDOW_HEIGHT;
+    g_Supervisor.viewport.MinZ = 0.0f;
+    g_Supervisor.viewport.MaxZ = 1.0f;
+
+    InitD3dDevice();
+    ScreenEffect::SetViewport(0);
+    g_GameWindow.isAppClosing = 0;
+    g_Supervisor.lastFrameTime = 0;
+    g_Supervisor.framerateMultiplier = 0.0;
+
+    return 0;
+#else
     u8 using_d3d_hal;
     D3DPRESENT_PARAMETERS present_params;
     D3DDISPLAYMODE display_mode;
@@ -1478,6 +1567,7 @@ i32 GameWindow::InitD3dRendering(void)
     g_Supervisor.lastFrameTime = 0;
     g_Supervisor.framerateMultiplier = 0.0;
     return 0;
+#endif
 }
 
 void GameWindow::InitD3dDevice(void)

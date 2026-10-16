@@ -12,6 +12,10 @@
 #include "utils.hpp"
 #include <d3d8.h>
 
+#ifdef USE_VULKAN
+#include "renderer.hpp"
+#endif
+
 namespace th06
 {
 ChainElem g_StageCalcChain;
@@ -95,9 +99,13 @@ ChainCallbackResult Stage::OnUpdate(Stage *stage)
                 stage->skyFog.farPlane = ((f32 *)curInsn->args)[2];
                 if (stage->skyFogInterpDuration == 0)
                 {
+#ifdef USE_VULKAN
+                    g_Renderer->SetFog(true, stage->skyFog.color, stage->skyFog.nearPlane, stage->skyFog.farPlane);
+#else
                     g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGCOLOR, stage->skyFog.color);
                     g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGSTART, *(u32 *)&stage->skyFog.nearPlane);
                     g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGEND, *(u32 *)&stage->skyFog.farPlane);
+#endif
                 }
                 stage->instructionIndex++;
                 stage->skyFogInterpFinal = stage->skyFog;
@@ -191,9 +199,13 @@ ChainCallbackResult Stage::OnUpdate(Stage *stage)
             stage->skyFog.farPlane =
                 (stage->skyFogInterpFinal.farPlane - stage->skyFogInterpInitial.farPlane) * skyFogInterpRatio +
                 stage->skyFogInterpInitial.farPlane;
+#ifdef USE_VULKAN
+            g_Renderer->SetFog(true, stage->skyFog.color, stage->skyFog.nearPlane, stage->skyFog.farPlane);
+#else
             g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGCOLOR, stage->skyFog.color);
             g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGSTART, *(u32 *)&stage->skyFog.nearPlane);
             g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGEND, *(u32 *)&stage->skyFog.farPlane);
+#endif
             if (stage->skyFogInterpTimer.current >= stage->skyFogInterpDuration)
             {
                 stage->skyFogInterpDuration = 0;
@@ -224,6 +236,9 @@ ChainCallbackResult Stage::OnUpdate(Stage *stage)
 
 ChainCallbackResult Stage::OnDrawHighPrio(Stage *stage)
 {
+#ifdef USE_VULKAN
+    g_Renderer->SetFog(true, stage->skyFog.color, stage->skyFog.nearPlane, stage->skyFog.farPlane);
+#else
     if (stage->skyFogNeedsSetup)
     {
         stage->skyFogNeedsSetup = 0;
@@ -231,6 +246,7 @@ ChainCallbackResult Stage::OnDrawHighPrio(Stage *stage)
     }
     g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGSTART, *(u32 *)&stage->skyFog.nearPlane);
     g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGEND, *(u32 *)&stage->skyFog.farPlane);
+#endif
 
     g_Supervisor.viewport.X = (DWORD)g_GameManager.arcadeRegionTopLeftPos.x;
     g_Supervisor.viewport.Y = (DWORD)g_GameManager.arcadeRegionTopLeftPos.y;
@@ -284,9 +300,13 @@ ChainCallbackResult Stage::OnDrawLowPrio(Stage *stage)
     GameManager::SetupCameraStageBackground(0);
     g_Supervisor.d3dDevice->SetViewport(&g_Supervisor.viewport);
     val = 1000.0f;
+#ifdef USE_VULKAN
+    g_Renderer->SetFog(true, stage->skyFog.color, 1000.0f, 2000.0f);
+#else
     g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGSTART, *(u32 *)&val);
     val = 2000.0f;
     g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGEND, *(u32 *)&val);
+#endif
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
 
@@ -331,9 +351,13 @@ ZunResult Stage::AddedCallback(Stage *stage)
     facingDirTimer->InitializeForPopup();
     stage->unpauseFlag = 0;
 
+#ifdef USE_VULKAN
+    g_Renderer->SetFog(true, stage->skyFog.color, stage->skyFog.nearPlane, stage->skyFog.farPlane);
+#else
     g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGCOLOR, stage->skyFog.color);
     g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGSTART, *(DWORD *)&stage->skyFog.nearPlane);
     g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGEND, *(DWORD *)&stage->skyFog.farPlane);
+#endif
     return ZUN_SUCCESS;
 }
 

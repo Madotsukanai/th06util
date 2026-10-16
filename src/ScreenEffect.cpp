@@ -5,6 +5,10 @@
 #include "Rng.hpp"
 #include "Supervisor.hpp"
 
+#ifdef USE_VULKAN
+#include "renderer.hpp"
+#endif
+
 namespace th06
 {
 
@@ -14,6 +18,13 @@ static i32 s_numActiveFadeIns = 0;
 
 void ScreenEffect::Clear(D3DCOLOR color)
 {
+#ifdef USE_VULKAN
+    g_Renderer->Clear(color, true);
+    g_Renderer->Present();
+    g_Renderer->Clear(color, true);
+    g_Renderer->Present();
+    return;
+#else
     g_Supervisor.d3dDevice->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, color, 1.0, 0);
     if (g_Supervisor.d3dDevice->Present(NULL, NULL, NULL, NULL) < 0)
     {
@@ -25,6 +36,7 @@ void ScreenEffect::Clear(D3DCOLOR color)
         g_Supervisor.d3dDevice->Reset(&g_Supervisor.presentParameters);
     }
     return;
+#endif
 }
 
 void ScreenEffect::SetViewport(D3DCOLOR color)
@@ -61,6 +73,15 @@ ChainCallbackResult ScreenEffect::CalcFadeIn(ScreenEffect *effect)
 
 void ScreenEffect::DrawSquare(ZunRect *rect, D3DCOLOR rectColor)
 {
+#ifdef USE_VULKAN
+    Vertex2D v[4];
+    v[0] = { rect->left,  rect->top,    0.0f, 0.0f, rectColor };
+    v[1] = { rect->right, rect->top,    1.0f, 0.0f, rectColor };
+    v[2] = { rect->left,  rect->bottom, 0.0f, 1.0f, rectColor };
+    v[3] = { rect->right, rect->bottom, 1.0f, 1.0f, rectColor };
+    g_Renderer->DrawColoredQuad2D(v, BLEND_ALPHA);
+    return;
+#else
     VertexDiffuseXyzrwh vertices[4];
 
     D3DXVECTOR3 pos0(rect->left, rect->top, 0.0f);
@@ -90,6 +111,7 @@ void ScreenEffect::DrawSquare(ZunRect *rect, D3DCOLOR rectColor)
     g_Supervisor.d3dDevice->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
     g_Supervisor.d3dDevice->SetVertexShader(D3DFVF_DIFFUSE | D3DFVF_XYZRHW);
     g_Supervisor.d3dDevice->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, vertices, sizeof(*vertices));
+#endif
     g_AnmManager->SetCurrentVertexShader(0xff);
     g_AnmManager->SetCurrentSprite(NULL);
     g_AnmManager->SetCurrentTexture(NULL);

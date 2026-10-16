@@ -18,6 +18,10 @@
 #include "utils.hpp"
 #include <stdio.h>
 
+#ifdef USE_VULKAN
+#include "renderer.hpp"
+#endif
+
 namespace th06
 {
 namespace EnemyEclInstr
@@ -32,6 +36,8 @@ extern i32 g_PlayerShot;
 
 namespace th06
 {
+
+i32 g_DeathbombCount = 0;
 
 char *g_EclFiles[9] = {"dummy",
                        "data/ecldata1.ecl",
@@ -557,6 +563,7 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
         mgr->deaths = 0;
         mgr->bombsUsed = 0;
         mgr->spellcardsCaptured = 0;
+        g_DeathbombCount = 0;
     }
     else
     {
@@ -1135,6 +1142,12 @@ void GameManager::SetupCameraStageBackground(f32 extraRenderDistance)
                                10000.0f + extraRenderDistance);
     g_Supervisor.d3dDevice->SetTransform(D3DTS_VIEW, &g_Supervisor.viewMatrix);
     g_Supervisor.d3dDevice->SetTransform(D3DTS_PROJECTION, &g_Supervisor.projectionMatrix);
+#ifdef USE_VULKAN
+    if (g_Renderer)
+    {
+        g_Renderer->SetCamera3D((const float*)&g_Supervisor.viewMatrix, (const float*)&g_Supervisor.projectionMatrix);
+    }
+#endif
     return;
 }
 
@@ -1176,6 +1189,12 @@ void GameManager::SetupCamera(f32 extraRenderDistance)
                                10000.0f + extraRenderDistance);
     g_Supervisor.d3dDevice->SetTransform(D3DTS_VIEW, &g_Supervisor.viewMatrix);
     g_Supervisor.d3dDevice->SetTransform(D3DTS_PROJECTION, &g_Supervisor.projectionMatrix);
+#ifdef USE_VULKAN
+    if (g_Renderer)
+    {
+        g_Renderer->SetCamera3D((const float*)&g_Supervisor.viewMatrix, (const float*)&g_Supervisor.projectionMatrix);
+    }
+#endif
     return;
 }
 
@@ -1211,6 +1230,7 @@ GameManager::GameManager()
 {
 
     memset(this, 0, sizeof(GameManager));
+    g_DeathbombCount = 0;
 
     (this->arcadeRegionTopLeftPos).x = GAME_REGION_LEFT;
     (this->arcadeRegionTopLeftPos).y = GAME_REGION_TOP;

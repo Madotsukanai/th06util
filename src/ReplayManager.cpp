@@ -26,6 +26,12 @@ static i32 s_SavedIsOnline = 0;
 #define ONLINE_REPLAY_MAGIC "T6ON"
 #define ONLINE_REPLAY_VERSION 1
 
+// Highest TH06Section value the bundled th06_spell_practice.dll can select (see
+// spell_practice_dll/th06_spell_practice.cpp).  StageReplayData::spellSection overlaps
+// padding that is uninitialized in replays written by the original game (the shipped
+// attract demos contain 0xCD filler), so a value outside this range must be ignored.
+#define SPELL_PRACTICE_MAX_SECTION 116
+
 static void RecordReplayInput(ReplayDataInput **cursor, ReplayDataInput **bookmark, i32 frameId, u16 inputs)
 {
     if (inputs != (*cursor)->inputKey)
@@ -601,7 +607,13 @@ ZunResult ReplayManager::AddedCallbackDemo(ReplayManager *mgr)
                               ? mgr->stageReplayDataP2[g_GameManager.currentStage - 1]->replayInputs
                               : NULL;
     g_GameManager.powerItemCountForScore = replayData->powerItemCountForScore;
-    g_IsSpellPracticeGame = (i32)replayData->spellSection;
+    // spellSection lives in padding that is uninitialized in original-game replays, so only
+    // accept it when it is a real spell practice section.  Otherwise the attract demos
+    // (whose padding holds 0xCD filler) would spuriously enable spell practice mode and
+    // desync from the first frame.
+    g_IsSpellPracticeGame = (replayData->spellSection >= 1 && replayData->spellSection <= SPELL_PRACTICE_MAX_SECTION)
+                                ? (i32)replayData->spellSection
+                                : 0;
     if (g_GameManager.currentStage >= 2 && mgr->replayData->stageReplayData[g_GameManager.currentStage - 2] != NULL)
     {
         g_GameManager.guiScore = mgr->replayData->stageReplayData[g_GameManager.currentStage - 2]->score;
@@ -611,8 +623,8 @@ ZunResult ReplayManager::AddedCallbackDemo(ReplayManager *mgr)
     {
         if (thpracLife >= 0)
             g_GameManager.livesRemaining = (i8)thpracLife;
-        if (thpracLife >= 0)
-            g_GameManager.bombsRemaining = (i8)thpracLife;
+        if (thpracBomb >= 0)
+            g_GameManager.bombsRemaining = (i8)thpracBomb;
         if (thpracPower >= 0)
             g_GameManager.currentPower = (i16)thpracPower;
         if (thpracScore >= 0)

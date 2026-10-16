@@ -23,6 +23,10 @@
 #include "i18n.hpp"
 #include "utils.hpp"
 
+#ifdef USE_VULKAN
+#include "renderer.hpp"
+#endif
+
 namespace th06
 {
 Player g_Player;
@@ -99,7 +103,15 @@ static void DrawHitboxFilledCircle(f32 x, f32 y, f32 radius, DWORD color)
         vertices[i + 1].color = color;
     }
 
+#ifdef USE_VULKAN
+    Vertex2D v2d[segments + 2];
+    for (int i = 0; i <= segments + 1; i++) {
+        v2d[i] = { vertices[i].x, vertices[i].y, 0.0f, 0.0f, vertices[i].color };
+    }
+    g_Renderer->DrawTriangleFan2D(g_Renderer->GetWhiteTexture(), v2d, segments + 2, BLEND_ALPHA);
+#else
     g_Supervisor.d3dDevice->DrawPrimitiveUP(D3DPT_TRIANGLEFAN, segments, vertices, sizeof(HitboxMarkerVertex));
+#endif
 }
 
 static void DrawHitboxRing(f32 x, f32 y, f32 innerRadius, f32 outerRadius, DWORD color)
@@ -126,7 +138,16 @@ static void DrawHitboxRing(f32 x, f32 y, f32 innerRadius, f32 outerRadius, DWORD
         vertices[vertexIdx + 1].color = color;
     }
 
+#ifdef USE_VULKAN
+    Vertex2D v2d_ring[(segments + 1) * 2];
+    for (int i = 0; i < (segments + 1) * 2; i++)
+    {
+        v2d_ring[i] = { vertices[i].x, vertices[i].y, 0.0f, 0.0f, vertices[i].color };
+    }
+    g_Renderer->DrawTriangleStrip2D(g_Renderer->GetWhiteTexture(), v2d_ring, (segments + 1) * 2, BLEND_ALPHA);
+#else
     g_Supervisor.d3dDevice->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, segments * 2, vertices, sizeof(HitboxMarkerVertex));
+#endif
 }
 
 void Player::UpdateHitboxMarker(Player *p)
@@ -480,6 +501,10 @@ ChainCallbackResult Player::OnUpdate(Player *p)
     else if (!g_Gui.HasCurrentMsgIdx() && p->respawnTimer != 0 && g_GameManager.bombsRemaining > 0 &&
              ((p->input & (TH_BUTTON_BOMB)) && !(p->previousFrameInput & (TH_BUTTON_BOMB))) && p->bombInfo.calc != NULL)
     {
+        if (p->playerState == PLAYER_STATE_DEAD)
+        {
+            g_DeathbombCount++;
+        }
         g_GameManager.bombsUsed++;
         g_GameManager.bombsRemaining--;
         g_Gui.flags.flag1 = 2;
