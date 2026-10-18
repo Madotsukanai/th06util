@@ -1,19 +1,30 @@
 #include "vulkan_renderer.hpp"
 #include "shaders_embedded.hpp"
+#include "shaders_embedded_frag.hpp"
 #include <SDL2/SDL_vulkan.h>
 #define STB_IMAGE_IMPLEMENTATION
 #include "../../3rdparty/stb_image.h"
 
 #include <cstdio>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <stdexcept>
 #include <optional>
 
+// forward decl from utils
+namespace th06 { namespace utils { void DbgLog(const char* fmt, ...); } }
+
 namespace th06 {
 
 IRenderer* g_Renderer = nullptr;
+
+// Debug draw tracing: armed when the first 3D stage quad is drawn so that the
+// log captures the in-game frames rather than the menus.
+static bool g_drawLogArmed = false;
+static long g_drawLogBudget = 0;
+static long g_q2dLogBudget = 0;
 
 // ── Global Vulkan Function Pointers ──────────────────────────
 #define VK_FUNC(name) static PFN_##name p##name = nullptr;
@@ -63,6 +74,7 @@ VK_FUNC(vkCmdSetScissor)
 VK_FUNC(vkCmdDrawIndexed)
 VK_FUNC(vkCmdPushConstants)
 VK_FUNC(vkCmdCopyBufferToImage)
+VK_FUNC(vkCmdCopyImageToBuffer)
 VK_FUNC(vkCmdPipelineBarrier)
 VK_FUNC(vkCreateBuffer)
 VK_FUNC(vkDestroyBuffer)
@@ -146,6 +158,7 @@ VK_FUNC(vkDeviceWaitIdle)
 #define vkCmdDrawIndexed pvkCmdDrawIndexed
 #define vkCmdPushConstants pvkCmdPushConstants
 #define vkCmdCopyBufferToImage pvkCmdCopyBufferToImage
+#define vkCmdCopyImageToBuffer pvkCmdCopyImageToBuffer
 #define vkCmdPipelineBarrier pvkCmdPipelineBarrier
 #define vkCreateBuffer pvkCreateBuffer
 #define vkDestroyBuffer pvkDestroyBuffer
@@ -249,6 +262,7 @@ static bool LoadVulkanSymbols(VkInstance instance = VK_NULL_HANDLE, VkDevice dev
     LOAD_D(vkCmdDrawIndexed);
     LOAD_D(vkCmdPushConstants);
     LOAD_D(vkCmdCopyBufferToImage);
+    LOAD_D(vkCmdCopyImageToBuffer);
     LOAD_D(vkCmdPipelineBarrier);
     LOAD_D(vkCreateBuffer);
     LOAD_D(vkDestroyBuffer);
@@ -535,6 +549,7 @@ bool VulkanRenderer::CreateSwapchain() {
             return false;
         }
     }
+    UpdateDestRect();
     return true;
 }
 
@@ -660,12 +675,12 @@ bool VulkanRenderer::CreateDescriptorPool() {
 
     VkDescriptorPoolSize poolSize{};
     poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSize.descriptorCount = 512;
+    poolSize.descriptorCount = 2048;
 
     VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     poolInfo.poolSizeCount = 1;
     poolInfo.pPoolSizes = &poolSize;
-    poolInfo.maxSets = 512;
+    poolInfo.maxSets = 2048;
     poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     if (vkCreateDescriptorPool(device_, &poolInfo, nullptr, &descPool_) != VK_SUCCESS) {
         return false;
@@ -683,7 +698,19 @@ bool VulkanRenderer::CreateDescriptorPool() {
     samplerInfo.unnormalizedCoordinates = VK_FALSE;
     samplerInfo.compareEnable = VK_FALSE;
     samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    return vkCreateSampler(device_, &samplerInfo, nullptr, &sampler_) == VK_SUCCESS;
+    if (vkCreateSampler(device_, &samplerInfo, nullptr, &sampler_) != VK_SUCCESS) {
+        return false;
+    }
+
+    // Same as above except wrap mode: textures whose sprites reach the edge of
+    // the texture must clamp, because bilinear fine sampling at 2.25x can reach
+    // slightly past the edge and REPEAT would teleport the sample to the far
+    // side of the texture (visible as dark/crossing lines around full-texture
+    // sprites).
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    return vkCreateSampler(device_, &samplerInfo, nullptr, &samplerClamp_) == VK_SUCCESS;
 }
 
 static VkShaderModule CreateShaderModuleFromSpv(VkDevice device, const uint32_t* code, size_t size) {
@@ -700,7 +727,7 @@ static VkShaderModule CreateShaderModuleFromSpv(VkDevice device, const uint32_t*
 bool VulkanRenderer::CreatePipelines() {
     // ── 2D Sprite Pipelines ──
     VkShaderModule spriteVertMod = CreateShaderModuleFromSpv(device_, kSpriteVertSpv, kSpriteVertSpvSize);
-    VkShaderModule spriteFragMod = CreateShaderModuleFromSpv(device_, kSpriteFragSpv, kSpriteFragSpvSize);
+    VkShaderModule spriteFragMod = CreateShaderModuleFromSpv(device_, kSpriteFrag2Spv, kSpriteFrag2SpvSize);
 
     VkPipelineShaderStageCreateInfo spriteStages[2]{};
     spriteStages[0] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, spriteVertMod, "main" };
@@ -710,7 +737,7 @@ bool VulkanRenderer::CreatePipelines() {
     VkVertexInputAttributeDescription attribs2D[3]{};
     attribs2D[0] = { 0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, x) };
     attribs2D[1] = { 1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, u) };
-    attribs2D[2] = { 2, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(Vertex2D, color) };
+    attribs2D[2] = { 2, 0, VK_FORMAT_B8G8R8A8_UNORM, offsetof(Vertex2D, color) };
 
     VkPipelineVertexInputStateCreateInfo vi2D{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
     vi2D.vertexBindingDescriptionCount = 1;
@@ -812,7 +839,7 @@ bool VulkanRenderer::CreatePipelines() {
 
     // ── 3D Stage Pipeline ──
     VkShaderModule stageVertMod = CreateShaderModuleFromSpv(device_, kStage3dVertSpv, kStage3dVertSpvSize);
-    VkShaderModule stageFragMod = CreateShaderModuleFromSpv(device_, kStage3dFragSpv, kStage3dFragSpvSize);
+    VkShaderModule stageFragMod = CreateShaderModuleFromSpv(device_, kStage3dFrag2Spv, kStage3dFrag2SpvSize);
 
     VkPipelineShaderStageCreateInfo stageStages[2]{};
     stageStages[0] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, stageVertMod, "main" };
@@ -822,7 +849,7 @@ bool VulkanRenderer::CreatePipelines() {
     VkVertexInputAttributeDescription attribs3D[3]{};
     attribs3D[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex3D, x) };
     attribs3D[1] = { 1, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(Vertex3D, u) };
-    attribs3D[2] = { 2, 0, VK_FORMAT_R8G8B8A8_UNORM,   offsetof(Vertex3D, color) };
+    attribs3D[2] = { 2, 0, VK_FORMAT_B8G8R8A8_UNORM,   offsetof(Vertex3D, color) };
 
     VkPipelineVertexInputStateCreateInfo vi3D{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
     vi3D.vertexBindingDescriptionCount = 1;
@@ -834,6 +861,12 @@ bool VulkanRenderer::CreatePipelines() {
     ds3D.depthTestEnable = VK_TRUE;
     ds3D.depthWriteEnable = VK_TRUE;
     ds3D.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    if (getenv("VKDBG_NO_DEPTH") != nullptr)
+    {
+        utils::DbgLog("[VkD] stage pipeline depth test DISABLED (VKDBG_NO_DEPTH)");
+        ds3D.depthTestEnable = VK_FALSE;
+        ds3D.depthWriteEnable = VK_FALSE;
+    }
 
     VkPushConstantRange pc3D{};
     pc3D.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -865,6 +898,12 @@ bool VulkanRenderer::CreatePipelines() {
     vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp3D, nullptr, &stagePipelineAlpha_);
     gp3D.pColorBlendState = &cbsAdd;
     vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp3D, nullptr, &stagePipelineAdd_);
+
+    // Same pipelines with depth writes disabled (AnmVm zWriteDisable).
+    ds3D.depthWriteEnable = VK_FALSE;
+    vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp3D, nullptr, &stagePipelineAddNoZ_);
+    gp3D.pColorBlendState = &cbsAlpha;
+    vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp3D, nullptr, &stagePipelineAlphaNoZ_);
 
     vkDestroyShaderModule(device_, stageVertMod, nullptr);
     vkDestroyShaderModule(device_, stageFragMod, nullptr);
@@ -957,9 +996,12 @@ void VulkanRenderer::Shutdown() {
 
         vkDestroyPipeline(device_, stagePipelineAlpha_, nullptr);
         vkDestroyPipeline(device_, stagePipelineAdd_, nullptr);
+        vkDestroyPipeline(device_, stagePipelineAlphaNoZ_, nullptr);
+        vkDestroyPipeline(device_, stagePipelineAddNoZ_, nullptr);
         vkDestroyPipelineLayout(device_, stagePipelineLayout_, nullptr);
 
         vkDestroySampler(device_, sampler_, nullptr);
+        vkDestroySampler(device_, samplerClamp_, nullptr);
         vkDestroyDescriptorPool(device_, descPool_, nullptr);
         vkDestroyDescriptorSetLayout(device_, descSetLayout_, nullptr);
 
@@ -988,7 +1030,120 @@ void VulkanRenderer::Shutdown() {
 }
 
 void VulkanRenderer::OnWindowResize(int /*width*/, int /*height*/) {
-    // Handled in Next frame acquire
+    // The swapchain is rebuilt at the start of the next frame.
+    swapchainDirty_ = true;
+}
+
+void VulkanRenderer::UpdateDestRect() {
+    // Letter-box the 640x480 game image into the swapchain, preserving the aspect ratio.
+    const float ew = static_cast<float>(swapchainExtent_.width);
+    const float eh = static_cast<float>(swapchainExtent_.height);
+    const float scale = std::min(ew / 640.0f, eh / 480.0f);
+    destW_ = 640.0f * scale;
+    destH_ = 480.0f * scale;
+    destX_ = std::floor((ew - destW_) * 0.5f);
+    destY_ = std::floor((eh - destH_) * 0.5f);
+}
+
+void VulkanRenderer::CleanupSwapchain() {
+    for (auto fb : framebuffers_) vkDestroyFramebuffer(device_, fb, nullptr);
+    framebuffers_.clear();
+
+    if (depthImageView_ != VK_NULL_HANDLE) vkDestroyImageView(device_, depthImageView_, nullptr);
+    if (depthImage_ != VK_NULL_HANDLE) vkDestroyImage(device_, depthImage_, nullptr);
+    if (depthMemory_ != VK_NULL_HANDLE) vkFreeMemory(device_, depthMemory_, nullptr);
+    depthImageView_ = VK_NULL_HANDLE;
+    depthImage_ = VK_NULL_HANDLE;
+    depthMemory_ = VK_NULL_HANDLE;
+
+    for (auto iv : swapchainImageViews_) vkDestroyImageView(device_, iv, nullptr);
+    swapchainImageViews_.clear();
+    swapchainImages_.clear();
+
+    if (swapchain_ != VK_NULL_HANDLE) vkDestroySwapchainKHR(device_, swapchain_, nullptr);
+    swapchain_ = VK_NULL_HANDLE;
+}
+
+bool VulkanRenderer::RecreateSwapchain() {
+    int dw = 0, dh = 0;
+    SDL_Vulkan_GetDrawableSize(window_, &dw, &dh);
+    if (dw <= 0 || dh <= 0) {
+        return false; // minimized: keep the dirty flag and retry next frame
+    }
+
+    vkDeviceWaitIdle(device_);
+    CleanupSwapchain();
+    if (!CreateSwapchain() || !CreateDepthBuffer() || !CreateFramebuffers()) {
+        fprintf(stderr, "[Vulkan] Failed to recreate swapchain\n");
+        return false;
+    }
+    swapchainDirty_ = false;
+    return true;
+}
+
+// Converts a rectangle given in 640x480 game space into a device-pixel scissor.
+static VkRect2D MakeScissor(float destX, float destY, float sx, float sy, int x, int y, int w, int h,
+                            const VkExtent2D& extent) {
+    int x0 = static_cast<int>(std::floor(destX + x * sx));
+    int y0 = static_cast<int>(std::floor(destY + y * sy));
+    int x1 = static_cast<int>(std::ceil(destX + (x + w) * sx));
+    int y1 = static_cast<int>(std::ceil(destY + (y + h) * sy));
+    x0 = std::max(0, x0);
+    y0 = std::max(0, y0);
+    x1 = std::min(static_cast<int>(extent.width), x1);
+    y1 = std::min(static_cast<int>(extent.height), y1);
+    if (x1 < x0) x1 = x0;
+    if (y1 < y0) y1 = y0;
+    VkRect2D r;
+    r.offset = { x0, y0 };
+    r.extent = { static_cast<uint32_t>(x1 - x0), static_cast<uint32_t>(y1 - y0) };
+    return r;
+}
+
+static constexpr uint32_t VERTEX_BUFFER_BYTES = MAX_VERTICES_PER_FRAME * sizeof(Vertex3D);
+
+bool VulkanRenderer::ResolveTexture(TextureHandle& tex) {
+    if (tex >= textures_.size() || !textures_[tex].inUse) {
+        tex = whiteTexture_;
+    }
+    if (tex >= textures_.size()) return false;
+
+    // Textures created empty (CreateTexture) are not on the GPU until first used.
+    if (!textures_[tex].valid || textures_[tex].dirty) {
+        UploadTextureGPU(tex);
+    }
+    return textures_[tex].valid;
+}
+
+bool VulkanRenderer::BeginBatch2D(TextureHandle tex, BlendMode blend, uint32_t vertexCount, uint32_t indexCount) {
+    if (vertexCount_ + vertexCount > MAX_VERTICES_PER_FRAME ||
+        indexCount_ + indexCount > MAX_INDICES_PER_FRAME) {
+        return false;
+    }
+
+    bool needNew = batches2D_.empty();
+    if (!needNew) {
+        const Batch2D& b = batches2D_.back();
+        needNew = b.texture != tex || b.blendMode != blend || b.colorOpAdd != colorOpAdd_ ||
+                  b.vpX != gameViewportX_ || b.vpY != gameViewportY_ || b.vpW != gameViewportW_ ||
+                  b.vpH != gameViewportH_ || b.vertexCount + vertexCount > 65535;
+    }
+    if (needNew) {
+        Batch2D nb;
+        nb.texture = tex;
+        nb.blendMode = blend;
+        nb.colorOpAdd = colorOpAdd_;
+        nb.vpX = gameViewportX_;
+        nb.vpY = gameViewportY_;
+        nb.vpW = gameViewportW_;
+        nb.vpH = gameViewportH_;
+        nb.vertexByteOffset = vertexCount_ * sizeof(Vertex2D);
+        nb.vertexCount = vertexCount;
+        nb.indexStart = indexCount_;
+        nb.indexCount = 0;
+        batches2D_.push_back(nb);
+    }
+    return true;
 }
 
 // ── Frame Lifecycle ──────────────────────────────────────────
@@ -996,13 +1151,22 @@ void VulkanRenderer::OnWindowResize(int /*width*/, int /*height*/) {
 void VulkanRenderer::BeginScene() {
     if (inScene_) return;
 
+    if (swapchainDirty_ && !RecreateSwapchain()) return;
+    if (swapchain_ == VK_NULL_HANDLE) return;
+
     auto& frame = frames_[currentFrame_];
     vkWaitForFences(device_, 1, &frame.inFlight, VK_TRUE, UINT64_MAX);
 
     VkResult res = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX, frame.imageAvailable, VK_NULL_HANDLE, &currentImageIndex_);
     if (res == VK_ERROR_OUT_OF_DATE_KHR) {
-        // Recreate swapchain
+        RecreateSwapchain();
         return;
+    }
+    if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
+        return;
+    }
+    if (res == VK_SUBOPTIMAL_KHR) {
+        swapchainDirty_ = true; // rebuild before the next frame
     }
 
     vkResetFences(device_, 1, &frame.inFlight);
@@ -1082,13 +1246,17 @@ void VulkanRenderer::Present() {
     presentInfo.pSwapchains = &swapchain_;
     presentInfo.pImageIndices = &currentImageIndex_;
 
-    vkQueuePresentKHR(presentQueue_, &presentInfo);
+    VkResult presentRes = vkQueuePresentKHR(presentQueue_, &presentInfo);
+    if (presentRes == VK_ERROR_OUT_OF_DATE_KHR || presentRes == VK_SUBOPTIMAL_KHR) {
+        swapchainDirty_ = true;
+    }
 
     currentFrame_ = (currentFrame_ + 1) % MAX_FRAMES_IN_FLIGHT;
     frameReady_ = false;
 }
 
 void VulkanRenderer::Clear(uint32_t argb, bool /*clearDepth*/) {
+    { static bool dbg=getenv("VKDBG_DRAWS")!=nullptr; if (dbg && g_drawLogArmed && g_drawLogBudget-- > 0) utils::DbgLog("[VkD] clear argb=%08x\n", argb); }
     clearColor_[0] = ((argb >> 16) & 0xFF) / 255.0f;
     clearColor_[1] = ((argb >>  8) & 0xFF) / 255.0f;
     clearColor_[2] = ((argb >>  0) & 0xFF) / 255.0f;
@@ -1096,23 +1264,46 @@ void VulkanRenderer::Clear(uint32_t argb, bool /*clearDepth*/) {
 }
 
 void VulkanRenderer::SetViewport(int x, int y, int width, int height) {
+    SetGameViewport(x, y, width, height, 0.0f, 1.0f);
+}
+
+void VulkanRenderer::SetGameViewport(int x, int y, int width, int height, float minZ, float maxZ) {
+    // The game viewport confines 3D stage rendering to the arcade region.
+    // It is stored (not applied immediately) because 2D quads are always drawn
+    // in absolute screen space with the full-screen viewport. The stored region
+    // is applied just before each 3D draw (see DrawQuad3D / ApplyGameViewport).
+    gameViewportX_ = x;
+    gameViewportY_ = y;
+    gameViewportW_ = width;
+    gameViewportH_ = height;
+    gameViewportMinZ_ = minZ;
+    gameViewportMaxZ_ = maxZ;
+}
+
+void VulkanRenderer::ApplyFullViewport() {
     if (!inScene_) return;
-    FlushBatch2D();
+    VkViewport vp{ 0.0f, 0.0f, (float)swapchainExtent_.width, (float)swapchainExtent_.height, 0.0f, 1.0f };
+    VkRect2D scissor{ { 0, 0 }, swapchainExtent_ };
+    vkCmdSetViewport(frames_[currentFrame_].cmdBuffer, 0, 1, &vp);
+    vkCmdSetScissor(frames_[currentFrame_].cmdBuffer, 0, 1, &scissor);
+}
+
+void VulkanRenderer::ApplyGameViewport() {
+    if (!inScene_) return;
 
     // Scale from 640x480 coordinate space to actual swapchain extent
     float scaleX = (float)swapchainExtent_.width / 640.0f;
     float scaleY = (float)swapchainExtent_.height / 480.0f;
 
-    VkViewport vp{
-        (float)x * scaleX,
-        (float)y * scaleY,
-        (float)width * scaleX,
-        (float)height * scaleY,
-        0.0f, 1.0f
-    };
+    float vx = (float)gameViewportX_ * scaleX;
+    float vy = (float)gameViewportY_ * scaleY;
+    float vw = (float)gameViewportW_ * scaleX;
+    float vh = (float)gameViewportH_ * scaleY;
+
+    VkViewport vp{ vx, vy, vw, vh, gameViewportMinZ_, gameViewportMaxZ_ };
     VkRect2D scissor{
-        { (int32_t)(x * scaleX), (int32_t)(y * scaleY) },
-        { (uint32_t)(width * scaleX), (uint32_t)(height * scaleY) }
+        { (int32_t)vx, (int32_t)vy },
+        { (uint32_t)vw, (uint32_t)vh }
     };
     vkCmdSetViewport(frames_[currentFrame_].cmdBuffer, 0, 1, &vp);
     vkCmdSetScissor(frames_[currentFrame_].cmdBuffer, 0, 1, &scissor);
@@ -1121,7 +1312,7 @@ void VulkanRenderer::SetViewport(int x, int y, int width, int height) {
 // ── 2D Drawing ───────────────────────────────────────────────
 
 void VulkanRenderer::DrawQuad2D(TextureHandle tex, const Vertex2D v[4], BlendMode blend) {
-    { static int n=0; if (n++ < 100) fprintf(stderr, "[VkD] q2d tex=%zu valid=%d wh=%ux%u blend=%d p0=(%.0f,%.0f) uv0=(%.2f,%.2f) col=%08x\n", (size_t)tex, tex<textures_.size()?(int)textures_[tex].valid:-1, tex<textures_.size()?textures_[tex].width:0, tex<textures_.size()?textures_[tex].height:0, (int)blend, v[0].x, v[0].y, v[0].u, v[0].v, v[0].color); }
+    { float qw = v[3].x - v[0].x; float qh = v[3].y - v[0].y; if (g_drawLogArmed && qw >= 30.0f && qw <= 34.0f && qh >= 30.0f && qh <= 34.0f && g_q2dLogBudget-- > 0) utils::DbgLog("[VkD] q2d tex=%zu wh=%ux%u blend=%d p0=(%.0f,%.0f) p3=(%.0f,%.0f) uv0=(%.4f,%.4f) uv3=(%.4f,%.4f) col=%08x\n", (size_t)tex, tex<textures_.size()?textures_[tex].width:0, tex<textures_.size()?textures_[tex].height:0, (int)blend, v[0].x, v[0].y, v[3].x, v[3].y, v[0].u, v[0].v, v[3].u, v[3].v, v[0].color); }
     if (!inScene_) return;
     if (tex >= textures_.size() || !textures_[tex].valid) {
         tex = whiteTexture_;
@@ -1134,18 +1325,38 @@ void VulkanRenderer::DrawQuad2D(TextureHandle tex, const Vertex2D v[4], BlendMod
 
     if (!batches2D_.empty()) {
         auto& last = batches2D_.back();
-        if (last.texture != tex || last.blendMode != blend) {
+        if (last.texture != tex || last.blendMode != blend || last.colorOpAdd != colorOpAdd_) {
             FlushBatch2D();
         }
     }
     if (batches2D_.empty()) {
-        batches2D_.push_back({ tex, blend, indexCount_, 0 });
+        Batch2D nb{};
+        nb.texture = tex;
+        nb.blendMode = blend;
+        nb.colorOpAdd = colorOpAdd_;
+        nb.vpX = gameViewportX_;
+        nb.vpY = gameViewportY_;
+        nb.vpW = gameViewportW_;
+        nb.vpH = gameViewportH_;
+        nb.indexStart = indexCount_;
+        nb.indexCount = 0;
+        batches2D_.push_back(nb);
     }
 
     auto& frame = frames_[currentFrame_];
     if (vertexCount_ + 4 > MAX_VERTICES_PER_FRAME || indexCount_ + 6 > MAX_INDICES_PER_FRAME) {
         FlushBatch2D();
-        batches2D_.push_back({ tex, blend, indexCount_, 0 });
+        Batch2D nb{};
+        nb.texture = tex;
+        nb.blendMode = blend;
+        nb.colorOpAdd = colorOpAdd_;
+        nb.vpX = gameViewportX_;
+        nb.vpY = gameViewportY_;
+        nb.vpW = gameViewportW_;
+        nb.vpH = gameViewportH_;
+        nb.indexStart = indexCount_;
+        nb.indexCount = 0;
+        batches2D_.push_back(nb);
     }
 
     Vertex2D* vDst = static_cast<Vertex2D*>(frame.mappedVertices) + vertexCount_;
@@ -1171,7 +1382,7 @@ void VulkanRenderer::DrawQuad2D(TextureHandle tex, const Vertex2D v[4], BlendMod
 }
 
 void VulkanRenderer::DrawColoredQuad2D(const Vertex2D v[4], BlendMode blend) {
-    { static int n=0; if (n++ < 40) fprintf(stderr, "[VkD] cq2d blend=%d p0=(%.0f,%.0f) p3=(%.0f,%.0f) col=%08x\n", (int)blend, v[0].x, v[0].y, v[3].x, v[3].y, v[0].color); }
+    { if (g_drawLogArmed && g_q2dLogBudget-- > 0) utils::DbgLog("[VkD] cq2d blend=%d p0=(%.0f,%.0f) p3=(%.0f,%.0f) col=%08x\n", (int)blend, v[0].x, v[0].y, v[3].x, v[3].y, v[0].color); }
     DrawQuad2D(whiteTexture_, v, blend);
 }
 
@@ -1186,18 +1397,38 @@ void VulkanRenderer::DrawTriangleStrip2D(TextureHandle tex, const Vertex2D* vert
 
     if (!batches2D_.empty()) {
         auto& last = batches2D_.back();
-        if (last.texture != tex || last.blendMode != blend) {
+        if (last.texture != tex || last.blendMode != blend || last.colorOpAdd != colorOpAdd_) {
             FlushBatch2D();
         }
     }
     if (batches2D_.empty()) {
-        batches2D_.push_back({ tex, blend, indexCount_, 0 });
+        Batch2D nb{};
+        nb.texture = tex;
+        nb.blendMode = blend;
+        nb.colorOpAdd = colorOpAdd_;
+        nb.vpX = gameViewportX_;
+        nb.vpY = gameViewportY_;
+        nb.vpW = gameViewportW_;
+        nb.vpH = gameViewportH_;
+        nb.indexStart = indexCount_;
+        nb.indexCount = 0;
+        batches2D_.push_back(nb);
     }
 
     auto& frame = frames_[currentFrame_];
     if (vertexCount_ + count > MAX_VERTICES_PER_FRAME || indexCount_ + numIndices > MAX_INDICES_PER_FRAME) {
         FlushBatch2D();
-        batches2D_.push_back({ tex, blend, indexCount_, 0 });
+        Batch2D nb{};
+        nb.texture = tex;
+        nb.blendMode = blend;
+        nb.colorOpAdd = colorOpAdd_;
+        nb.vpX = gameViewportX_;
+        nb.vpY = gameViewportY_;
+        nb.vpW = gameViewportW_;
+        nb.vpH = gameViewportH_;
+        nb.indexStart = indexCount_;
+        nb.indexCount = 0;
+        batches2D_.push_back(nb);
     }
 
     Vertex2D* vDst = static_cast<Vertex2D*>(frame.mappedVertices) + vertexCount_;
@@ -1235,18 +1466,38 @@ void VulkanRenderer::DrawTriangleFan2D(TextureHandle tex, const Vertex2D* verts,
 
     if (!batches2D_.empty()) {
         auto& last = batches2D_.back();
-        if (last.texture != tex || last.blendMode != blend) {
+        if (last.texture != tex || last.blendMode != blend || last.colorOpAdd != colorOpAdd_) {
             FlushBatch2D();
         }
     }
     if (batches2D_.empty()) {
-        batches2D_.push_back({ tex, blend, indexCount_, 0 });
+        Batch2D nb{};
+        nb.texture = tex;
+        nb.blendMode = blend;
+        nb.colorOpAdd = colorOpAdd_;
+        nb.vpX = gameViewportX_;
+        nb.vpY = gameViewportY_;
+        nb.vpW = gameViewportW_;
+        nb.vpH = gameViewportH_;
+        nb.indexStart = indexCount_;
+        nb.indexCount = 0;
+        batches2D_.push_back(nb);
     }
 
     auto& frame = frames_[currentFrame_];
     if (vertexCount_ + count > MAX_VERTICES_PER_FRAME || indexCount_ + numIndices > MAX_INDICES_PER_FRAME) {
         FlushBatch2D();
-        batches2D_.push_back({ tex, blend, indexCount_, 0 });
+        Batch2D nb{};
+        nb.texture = tex;
+        nb.blendMode = blend;
+        nb.colorOpAdd = colorOpAdd_;
+        nb.vpX = gameViewportX_;
+        nb.vpY = gameViewportY_;
+        nb.vpW = gameViewportW_;
+        nb.vpH = gameViewportH_;
+        nb.indexStart = indexCount_;
+        nb.indexCount = 0;
+        batches2D_.push_back(nb);
     }
 
     Vertex2D* vDst = static_cast<Vertex2D*>(frame.mappedVertices) + vertexCount_;
@@ -1270,25 +1521,25 @@ void VulkanRenderer::DrawTriangleFan2D(TextureHandle tex, const Vertex2D* verts,
 void VulkanRenderer::FlushBatch2D() {
     if (batches2D_.empty() || indexCount_ == 0) return;
 
+    // 2D quads use absolute screen coordinates, so always draw them with the
+    // full-screen viewport regardless of the current game viewport.
+    ApplyFullViewport();
+
     auto& frame = frames_[currentFrame_];
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(frame.cmdBuffer, 0, 1, &frame.vertexBuffer, &offset);
     vkCmdBindIndexBuffer(frame.cmdBuffer, frame.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
-    PushConstants2D pc{};
+    PushConstants2D pcBase{};
     // Orthographic projection: [0, 640] x [0, 480] -> [-1, 1] x [-1, 1]
     // Vulkan Y is downwards (0 at top, 1 at bottom in NDC if using standard viewport)
-    pc.projMat[0]  =  2.0f / 640.0f;
-    pc.projMat[5]  =  2.0f / 480.0f;
-    pc.projMat[10] =  1.0f;
-    pc.projMat[12] = -1.0f;
-    pc.projMat[13] = -1.0f;
-    pc.projMat[15] =  1.0f;
-    pc.colorKeyEnable = 0.0f;
-
-    vkCmdPushConstants(frame.cmdBuffer, spritePipelineLayout_,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0, sizeof(PushConstants2D), &pc);
+    pcBase.projMat[0]  =  2.0f / 640.0f;
+    pcBase.projMat[5]  =  2.0f / 480.0f;
+    pcBase.projMat[10] =  1.0f;
+    pcBase.projMat[12] = -1.0f;
+    pcBase.projMat[13] = -1.0f;
+    pcBase.projMat[15] =  1.0f;
+    pcBase.colorKeyEnable = 0.0f;
 
     for (const auto& batch : batches2D_) {
         if (batch.indexCount == 0) continue;
@@ -1297,12 +1548,18 @@ void VulkanRenderer::FlushBatch2D() {
         if (batch.blendMode == BLEND_ADD) pipeline = spritePipelineAdd_;
         else if (batch.blendMode == BLEND_SUB) pipeline = spritePipelineSub_;
 
+        PushConstants2D pc = pcBase;
+        pc.colorOpAdd = batch.colorOpAdd ? 1.0f : 0.0f;
+        vkCmdPushConstants(frame.cmdBuffer, spritePipelineLayout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(PushConstants2D), &pc);
+
         vkCmdBindPipeline(frame.cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
         if (batch.texture < textures_.size() && textures_[batch.texture].valid) {
             vkCmdBindDescriptorSets(frame.cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     spritePipelineLayout_, 0, 1,
-                                    &textures_[batch.texture].descriptorSet, 0, nullptr);
+                                    &textures_[batch.texture].descriptorSet2D, 0, nullptr);
         }
 
         vkCmdDrawIndexed(frame.cmdBuffer, batch.indexCount, 1, batch.indexStart, 0, 0);
@@ -1332,9 +1589,27 @@ void VulkanRenderer::SetCamera3D(const float view[16], const float proj[16]) {
             }
         }
     }
+
+    static bool dbgDraws = getenv("VKDBG_DRAWS") != nullptr;
+    static int mcnt = 0;
+    if (dbgDraws && mcnt++ < 2) {
+        utils::DbgLog("[VkD] proj=[%.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f]",
+            proj[0],proj[1],proj[2],proj[3],proj[4],proj[5],proj[6],proj[7],proj[8],proj[9],proj[10],proj[11],proj[12],proj[13],proj[14],proj[15]);
+        utils::DbgLog("[VkD] view=[%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f]",
+            view[0],view[1],view[2],view[3],view[4],view[5],view[6],view[7],view[8],view[9],view[10],view[11],view[12],view[13],view[14],view[15]);
+    }
 }
 
 void VulkanRenderer::SetFog(bool enable, uint32_t color, float nearZ, float farZ) {
+    static bool dbgOnce = []() {
+        utils::DbgLog("[FOG] SetFog enabled");
+        return true;
+    }();
+    static int cnt = 0;
+    if (cnt++ < 600)
+    {
+        utils::DbgLog("[FOG] enable=%d col=%08x near=%.1f far=%.1f", (int)enable, color, nearZ, farZ);
+    }
     fogEnable_ = enable;
     fogColor_ = color;
     fogNear_ = nearZ;
@@ -1342,9 +1617,22 @@ void VulkanRenderer::SetFog(bool enable, uint32_t color, float nearZ, float farZ
 }
 
 void VulkanRenderer::DrawQuad3D(const float world[16], TextureHandle tex, const Vertex3D v[4], BlendMode blend) {
-    { static int n=0; if (n++ < 40) fprintf(stderr, "[VkD] q3d tex=%zu valid=%d blend=%d v0=(%.0f,%.0f,%.0f) col=%08x\n", (size_t)tex, tex<textures_.size()?(int)textures_[tex].valid:-1, (int)blend, v[0].x, v[0].y, v[0].z, v[0].color); }
+    static bool dbgDraws = getenv("VKDBG_DRAWS") != nullptr;
+    if (!g_drawLogArmed) { g_drawLogArmed = true; g_drawLogBudget = 4000; g_q2dLogBudget = 20000; }
+    if (dbgDraws && g_drawLogBudget-- > 0)
+    {
+        uint32_t c = v[0].color;
+        utils::DbgLog("[VkD] q3d tex=%zu valid=%d blend=%d col=(r%.0f,g%.0f,b%.0f,a%.0f) uv0=(%.3f,%.3f) uv3=(%.3f,%.3f)",
+                      (size_t)tex, tex < textures_.size() ? (int)textures_[tex].valid : -1, (int)blend,
+                      (float)((c >> 16) & 0xFF), (float)((c >> 8) & 0xFF), (float)(c & 0xFF),
+                      (float)((c >> 24) & 0xFF), v[0].u, v[0].v, v[3].u, v[3].v);
+    }
     if (!inScene_) return;
     FlushBatch2D();
+
+    // 3D stage geometry is projected through the arcade-region camera, so it
+    // must be drawn into the game viewport (with matching depth range/scissor).
+    ApplyGameViewport();
 
     if (tex >= textures_.size() || !textures_[tex].valid) tex = whiteTexture_;
     if (tex == INVALID_TEXTURE) return;
@@ -1361,11 +1649,35 @@ void VulkanRenderer::DrawQuad3D(const float world[16], TextureHandle tex, const 
     uint16_t* iDst = static_cast<uint16_t*>(frame.mappedIndices) + indexCount_;
     uint16_t base = static_cast<uint16_t>(vertexCount_);
 
+    float x0, y0, z0;
     for (int i = 0; i < 4; i++) {
         float x = v[i].x * world[0] + v[i].y * world[4] + v[i].z * world[8]  + world[12];
         float y = v[i].x * world[1] + v[i].y * world[5] + v[i].z * world[9]  + world[13];
         float z = v[i].x * world[2] + v[i].y * world[6] + v[i].z * world[10] + world[14];
+        if (i == 0) { x0 = x; y0 = y; z0 = z; }
         vDst[i] = { x, y, z, v[i].u, v[i].v, v[i].color };
+    }
+
+    static bool foliageSolid = getenv("VKDBG_FOLIAGE_SOLID") != nullptr;
+    if (foliageSolid && z0 > -320.0f && z0 < -280.0f) {
+        float dx = 192.0f - x0;
+        for (int i = 0; i < 4; i++) { vDst[i].x += dx; vDst[i].color = 0xFFFF00FF; }
+        tex = whiteTexture_;
+        utils::DbgLog("[VkD] foliage SOLID recenter dx=%.1f v0ndc=(%.2f,%.2f)", dx,
+                      (vDst[0].x*viewProjMatrix_[0]+vDst[0].y*viewProjMatrix_[4]+vDst[0].z*viewProjMatrix_[8]+viewProjMatrix_[12]),
+                      (vDst[0].x*viewProjMatrix_[1]+vDst[0].y*viewProjMatrix_[5]+vDst[0].z*viewProjMatrix_[9]+viewProjMatrix_[13]));
+    }
+
+    if (dbgDraws && g_drawLogBudget-- > 0) {
+        const float* P = viewProjMatrix_;
+        float cw = x0*P[3] + y0*P[7] + z0*P[11] + P[15];
+        float cx = x0*P[0] + y0*P[4] + z0*P[8]  + P[12];
+        float cy = x0*P[1] + y0*P[5] + z0*P[9]  + P[13];
+        float cd = x0*P[2] + y0*P[6] + z0*P[10] + P[14];
+        utils::DbgLog("[VkD]   w-pos=(%.1f,%.1f,%.1f) ndc=(%.3f,%.3f) depth=%.3f vp=(%d,%d,%d,%d) zr=(%.2f,%.2f)",
+                      x0, y0, z0, cw ? cx/cw : -9.0f, cw ? cy/cw : -9.0f, cw ? cd/cw : -9.0f,
+                      gameViewportX_, gameViewportY_, gameViewportW_, gameViewportH_,
+                      gameViewportMinZ_, gameViewportMaxZ_);
     }
 
     iDst[0] = base + 0;
@@ -1388,6 +1700,11 @@ void VulkanRenderer::DrawQuad3D(const float world[16], TextureHandle tex, const 
     pc3D.fogDist[0] = fogNear_;
     pc3D.fogDist[1] = fogFar_;
     pc3D.fogEnable = fogEnable_ ? 1.0f : 0.0f;
+    static bool noFogDbg = getenv("VKDBG_NO_FOG") != nullptr;
+    if (noFogDbg)
+    {
+        pc3D.fogEnable = 0.0f;
+    }
 
     vkCmdPushConstants(frame.cmdBuffer, stagePipelineLayout_,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -1408,13 +1725,14 @@ void VulkanRenderer::DrawQuad3D(const float world[16], TextureHandle tex, const 
 
 // ── Texture Management ───────────────────────────────────────
 
-TextureHandle VulkanRenderer::CreateTexture(uint32_t width, uint32_t height) {
+TextureHandle VulkanRenderer::CreateTexture(uint32_t width, uint32_t height, bool clampToEdge) {
     TextureResource res;
     res.width = width;
     res.height = height;
     res.cpuData.resize(width * height * 4, 0);
     res.dirty = true;
     res.valid = false;
+    res.clampToEdge = clampToEdge;
 
     // Find free slot. Slot 0 is reserved for the white texture so that a
     // valid texture handle is never 0 (the game casts handles to pointers and
@@ -1429,7 +1747,8 @@ TextureHandle VulkanRenderer::CreateTexture(uint32_t width, uint32_t height) {
     return textures_.size() - 1;
 }
 
-TextureHandle VulkanRenderer::CreateTextureFromMemory(const void* data, size_t size, uint32_t colorKey) {
+TextureHandle VulkanRenderer::CreateTextureFromMemory(const void* data, size_t size, uint32_t colorKey,
+                                                      bool clampToEdge) {
     int w, h, ch;
     unsigned char* pixels = stbi_load_from_memory(static_cast<const unsigned char*>(data),
                                                   static_cast<int>(size), &w, &h, &ch, 4);
@@ -1450,7 +1769,21 @@ TextureHandle VulkanRenderer::CreateTextureFromMemory(const void* data, size_t s
         }
     }
 
-    TextureHandle handle = CreateTexture(w, h);
+    {
+        long long sr = 0, sg = 0, sb = 0, sa = 0;
+        for (int i = 0; i < w * h; i++) {
+            sr += pixels[i * 4 + 0]; sg += pixels[i * 4 + 1]; sb += pixels[i * 4 + 2]; sa += pixels[i * 4 + 3];
+        }
+        long long n = (long long)w * h;
+        utils::DbgLog("[VkT] decode %dx%d avg=(r%lld,g%lld,b%lld,a%lld) px(33,112)=(%d,%d,%d,%d)",
+                      w, h, sr / n, sg / n, sb / n, sa / n,
+                      w > 33 && h > 112 ? pixels[(112 * w + 33) * 4 + 0] : -1,
+                      w > 33 && h > 112 ? pixels[(112 * w + 33) * 4 + 1] : -1,
+                      w > 33 && h > 112 ? pixels[(112 * w + 33) * 4 + 2] : -1,
+                      w > 33 && h > 112 ? pixels[(112 * w + 33) * 4 + 3] : -1);
+    }
+
+    TextureHandle handle = CreateTexture(w, h, clampToEdge);
     SurfaceDesc desc;
     if (LockTexture(handle, &desc)) {
         // Convert RGBA -> BGRA
@@ -1487,8 +1820,10 @@ void VulkanRenderer::ReleaseTexture(TextureHandle handle) {
     if (handle < textures_.size() && textures_[handle].valid) {
         vkDeviceWaitIdle(device_);
         if (textures_[handle].descriptorSet != VK_NULL_HANDLE) {
-            vkFreeDescriptorSets(device_, descPool_, 1, &textures_[handle].descriptorSet);
+            VkDescriptorSet sets[2] = { textures_[handle].descriptorSet, textures_[handle].descriptorSet2D };
+            vkFreeDescriptorSets(device_, descPool_, 2, sets);
             textures_[handle].descriptorSet = VK_NULL_HANDLE;
+            textures_[handle].descriptorSet2D = VK_NULL_HANDLE;
         }
         vkDestroyImageView(device_, textures_[handle].view, nullptr);
         vkDestroyImage(device_, textures_[handle].image, nullptr);
@@ -1537,12 +1872,16 @@ void VulkanRenderer::UploadTextureGPU(TextureHandle handle) {
         ivci.subresourceRange.layerCount = 1;
         vkCreateImageView(device_, &ivci, nullptr, &tex.view);
 
+        // Known-good path: two separate count-1 allocations (a combined count-2
+        // allocation crashed in the loader/Unix bridge on some systems).
         VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
         dsai.descriptorPool = descPool_;
         dsai.descriptorSetCount = 1;
         dsai.pSetLayouts = &descSetLayout_;
         vkAllocateDescriptorSets(device_, &dsai, &tex.descriptorSet);
+        vkAllocateDescriptorSets(device_, &dsai, &tex.descriptorSet2D);
 
+        // Set 0: REPEAT sampler (3D stage path always, 2D for repeat textures).
         VkDescriptorImageInfo dii{};
         dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         dii.imageView = tex.view;
@@ -1554,6 +1893,14 @@ void VulkanRenderer::UploadTextureGPU(TextureHandle handle) {
         wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         wds.descriptorCount = 1;
         wds.pImageInfo = &dii;
+        vkUpdateDescriptorSets(device_, 1, &wds, 0, nullptr);
+
+        // Set 1: 2D sampler; textures whose sprites span a texture edge use
+        // CLAMP_TO_EDGE so that bilinear samples past the edge latch on the
+        // edge texel instead of wrapping around to the far side of the
+        // texture (dark grid lines around full-coverage sprites).
+        dii.sampler = tex.clampToEdge ? samplerClamp_ : sampler_;
+        wds.dstSet = tex.descriptorSet2D;
         vkUpdateDescriptorSets(device_, 1, &wds, 0, nullptr);
 
         tex.valid = true;
@@ -1639,8 +1986,235 @@ void VulkanRenderer::UploadTextureGPU(TextureHandle handle) {
     tex.dirty = false;
 }
 
-void VulkanRenderer::CaptureScreen(TextureHandle /*target*/) {
-    // Post-process screen capture placeholder
+void VulkanRenderer::CaptureScreen(TextureHandle target, int left, int top, int width, int height) {
+    // Runs between frames (right after Present), when the swapchain image that
+    // was just presented is idle and in the PRESENT_SRC layout.
+    if (inScene_ || swapchain_ == VK_NULL_HANDLE) return;
+    if (target >= textures_.size() || currentImageIndex_ >= swapchainImages_.size()) return;
+    if (width <= 0 || height <= 0) return;
+    auto& dst = textures_[target];
+    if (dst.width == 0 || dst.height == 0) return;
+
+    // D3DXLoadSurfaceFromSurface scales the source rect to FILL the destination
+    // texture (the original game uses this for its pause bg), so capture the
+    // full requested rect and let BlitPixelsToTexture downscale it.
+
+    // The 640x480 game image is letter-boxed into the swapchain; map the
+    // source rect into swapchain pixels.
+    int ix0 = static_cast<int>(std::lround(destX_ + static_cast<float>(left) / 640.0f * destW_));
+    int iy0 = static_cast<int>(std::lround(destY_ + static_cast<float>(top) / 480.0f * destH_));
+    int iw = static_cast<int>(std::lround(static_cast<float>(width) / 640.0f * destW_));
+    int ih = static_cast<int>(std::lround(static_cast<float>(height) / 480.0f * destH_));
+    if (ix0 < 0) { iw += ix0; ix0 = 0; }
+    if (iy0 < 0) { ih += iy0; iy0 = 0; }
+    if (ix0 + iw > static_cast<int>(swapchainExtent_.width)) iw = static_cast<int>(swapchainExtent_.width) - ix0;
+    if (iy0 + ih > static_cast<int>(swapchainExtent_.height)) ih = static_cast<int>(swapchainExtent_.height) - iy0;
+    if (iw <= 0 || ih <= 0) return;
+
+    vkQueueWaitIdle(graphicsQueue_);
+    if (presentQueue_ != VK_NULL_HANDLE) vkQueueWaitIdle(presentQueue_);
+
+    VkDeviceSize stagingSize = static_cast<VkDeviceSize>(iw) * ih * 4;
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingMemory;
+    VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bci.size = stagingSize;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device_, &bci, nullptr, &stagingBuffer) != VK_SUCCESS) return;
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(device_, stagingBuffer, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize = req.size;
+    mai.memoryTypeIndex = FindMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(device_, &mai, nullptr, &stagingMemory) != VK_SUCCESS) {
+        vkDestroyBuffer(device_, stagingBuffer, nullptr);
+        return;
+    }
+    vkBindBufferMemory(device_, stagingBuffer, stagingMemory, 0);
+
+    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool = cmdPool_;
+    cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer cmd;
+    if (vkAllocateCommandBuffers(device_, &cbai, &cmd) != VK_SUCCESS) {
+        vkDestroyBuffer(device_, stagingBuffer, nullptr);
+        vkFreeMemory(device_, stagingMemory, nullptr);
+        return;
+    }
+    VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+
+    VkImageMemoryBarrier barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = swapchainImages_[currentImageIndex_];
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = { ix0, iy0, 0 };
+    region.imageExtent = { static_cast<uint32_t>(iw), static_cast<uint32_t>(ih), 1 };
+    vkCmdCopyImageToBuffer(cmd, swapchainImages_[currentImageIndex_], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuffer, 1, &region);
+
+    // Restore the present layout so the image stays presentable.
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.dstAccessMask = 0;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkQueueSubmit(graphicsQueue_, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(graphicsQueue_);
+    vkFreeCommandBuffers(device_, cmdPool_, 1, &cmd);
+
+    void* mapped;
+    if (vkMapMemory(device_, stagingMemory, 0, stagingSize, 0, &mapped) == VK_SUCCESS) {
+        // Swapchain pixels are BGRA (preferred format) or RGBA; the source
+        // buffer for BlitPixelsToTexture is 0xAARRGGBB.
+        bool rgbaOrder = (swapchainFormat_ == VK_FORMAT_R8G8B8A8_UNORM);
+        std::vector<uint32_t> argb(static_cast<size_t>(iw) * ih);
+        const uint8_t* src = static_cast<const uint8_t*>(mapped);
+        for (size_t p = 0; p < argb.size(); p++) {
+            uint8_t b0 = src[p * 4 + 0], b1 = src[p * 4 + 1];
+            uint8_t b2 = src[p * 4 + 2], b3 = src[p * 4 + 3];
+            uint8_t r = rgbaOrder ? b0 : b2;
+            uint8_t b = rgbaOrder ? b2 : b0;
+            argb[p] = (static_cast<uint32_t>(b3) << 24) | (static_cast<uint32_t>(r) << 16)
+                    | (static_cast<uint32_t>(b1) << 8) | b;
+        }
+        vkUnmapMemory(device_, stagingMemory);
+        {
+            FILE *fp = fopen("capture_engine.bin", "wb");
+            if (fp != nullptr) {
+                uint32_t hdr[2] = { static_cast<uint32_t>(iw), static_cast<uint32_t>(ih) };
+                fwrite(hdr, sizeof(hdr), 1, fp);
+                fwrite(argb.data(), 4, argb.size(), fp);
+                fclose(fp);
+            }
+        }
+        BlitPixelsToTexture(target, 0, 0, static_cast<int>(dst.width), static_cast<int>(dst.height),
+                            argb.data(), iw, ih);
+    }
+
+    vkDestroyBuffer(device_, stagingBuffer, nullptr);
+    vkFreeMemory(device_, stagingMemory, nullptr);
+}
+
+bool VulkanRenderer::LoadSurfaceImage(int index, const void* data, size_t size, uint32_t* outWidth,
+                                      uint32_t* outHeight) {
+    if (index < 0) return false;
+    if (static_cast<size_t>(index) >= surfaceImages_.size()) surfaceImages_.resize(index + 1);
+    ReleaseSurfaceImage(index);
+
+    TextureHandle handle = CreateTextureFromMemory(data, size, 0);
+    if (handle == INVALID_TEXTURE) return false;
+
+    SurfaceDesc desc;
+    if (!LockTexture(handle, &desc)) {
+        ReleaseTexture(handle);
+        return false;
+    }
+    surfaceImages_[index].tex = handle;
+    surfaceImages_[index].width = desc.width;
+    surfaceImages_[index].height = desc.height;
+    if (outWidth) *outWidth = desc.width;
+    if (outHeight) *outHeight = desc.height;
+    return true;
+}
+
+void VulkanRenderer::DrawSurfaceRegion(int index, int dstX, int dstY, int srcX, int srcY, int srcW,
+                                       int srcH) {
+    if (index < 0 || static_cast<size_t>(index) >= surfaceImages_.size()) return;
+    const SurfaceImage& s = surfaceImages_[index];
+    if (s.tex == INVALID_TEXTURE || s.width == 0 || s.height == 0) return;
+    if (srcW <= 0 || srcH <= 0) return;
+
+    float u0 = static_cast<float>(srcX) / static_cast<float>(s.width);
+    float v0 = static_cast<float>(srcY) / static_cast<float>(s.height);
+    float u1 = static_cast<float>(srcX + srcW) / static_cast<float>(s.width);
+    float v1 = static_cast<float>(srcY + srcH) / static_cast<float>(s.height);
+    float x0 = static_cast<float>(dstX);
+    float y0 = static_cast<float>(dstY);
+    float x1 = static_cast<float>(dstX + srcW);
+    float y1 = static_cast<float>(dstY + srcH);
+
+    Vertex2D v[4] = {
+        { x0, y0, u0, v0, 0xFFFFFFFFu },
+        { x1, y0, u1, v0, 0xFFFFFFFFu },
+        { x0, y1, u0, v1, 0xFFFFFFFFu },
+        { x1, y1, u1, v1, 0xFFFFFFFFu },
+    };
+    DrawQuad2D(s.tex, v, BLEND_NONE);
+}
+
+void VulkanRenderer::ReleaseSurfaceImage(int index) {
+    if (index < 0 || static_cast<size_t>(index) >= surfaceImages_.size()) return;
+    if (surfaceImages_[index].tex != INVALID_TEXTURE) {
+        ReleaseTexture(surfaceImages_[index].tex);
+        surfaceImages_[index].tex = INVALID_TEXTURE;
+    }
+    surfaceImages_[index].width = 0;
+    surfaceImages_[index].height = 0;
+}
+
+void VulkanRenderer::BlitPixelsToTexture(TextureHandle tex, int dstX, int dstY, int dstW, int dstH,
+                                         const uint32_t* argbSrc, int srcW, int srcH) {
+    if (tex >= textures_.size()) return;
+    if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) return;
+    auto& t = textures_[tex];
+    if (t.width == 0 || t.height == 0) return;
+
+    for (int y = 0; y < dstH; y++) {
+        int ty = dstY + y;
+        if (ty < 0 || ty >= static_cast<int>(t.height)) continue;
+        for (int x = 0; x < dstW; x++) {
+            int tx = dstX + x;
+            if (tx < 0 || tx >= static_cast<int>(t.width)) continue;
+
+            int sx0 = x * srcW / dstW;
+            int sx1 = (x + 1) * srcW / dstW;
+            int sy0 = y * srcH / dstH;
+            int sy1 = (y + 1) * srcH / dstH;
+            if (sx1 <= sx0) sx1 = sx0 + 1;
+            if (sy1 <= sy0) sy1 = sy0 + 1;
+
+            uint32_t a = 0, r = 0, g = 0, b = 0, n = 0;
+            for (int sy = sy0; sy < sy1 && sy < srcH; sy++) {
+                for (int sx = sx0; sx < sx1 && sx < srcW; sx++) {
+                    uint32_t p = argbSrc[static_cast<size_t>(sy) * srcW + sx];
+                    a += (p >> 24) & 0xFF;
+                    r += (p >> 16) & 0xFF;
+                    g += (p >> 8) & 0xFF;
+                    b += p & 0xFF;
+                    n++;
+                }
+            }
+            if (n == 0) continue;
+            uint8_t* px = &t.cpuData[(static_cast<size_t>(ty) * t.width + tx) * 4];
+            px[0] = static_cast<uint8_t>(b / n);
+            px[1] = static_cast<uint8_t>(g / n);
+            px[2] = static_cast<uint8_t>(r / n);
+            px[3] = static_cast<uint8_t>(a / n);
+        }
+    }
+    t.dirty = true;
+    UploadTextureGPU(tex);
 }
 
 } // namespace th06

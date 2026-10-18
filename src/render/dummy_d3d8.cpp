@@ -1,6 +1,7 @@
 #ifdef USE_VULKAN
 
 #include "dummy_d3d8.hpp"
+#include "renderer.hpp"
 #include <cstring>
 
 namespace th06 {
@@ -162,7 +163,13 @@ public:
     HRESULT STDMETHODCALLTYPE MultiplyTransform(D3DTRANSFORMSTATETYPE, CONST D3DMATRIX*) override { return S_OK; }
     D3DVIEWPORT8 curViewport_ = { 0, 0, 640, 480, 0.0f, 1.0f };
     HRESULT STDMETHODCALLTYPE SetViewport(CONST D3DVIEWPORT8* p) override {
-        if (p) curViewport_ = *p;
+        if (p) {
+            curViewport_ = *p;
+            if (g_Renderer) {
+                g_Renderer->SetGameViewport((int)p->X, (int)p->Y, (int)p->Width, (int)p->Height,
+                                            p->MinZ, p->MaxZ);
+            }
+        }
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetViewport(D3DVIEWPORT8* p) override {

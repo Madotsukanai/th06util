@@ -104,6 +104,11 @@ struct AnmManager
     ZunResult LoadTexture(i32 textureIdx, char *textureName, i32 textureFormat, D3DCOLOR colorKey);
     ZunResult LoadTextureAlphaChannel(i32 textureIdx, char *textureName, i32 textureFormat, D3DCOLOR colorKey);
     void ReleaseTexture(i32 textureIdx);
+#ifdef USE_VULKAN
+    bool AnmUsesUvScroll(AnmRawEntry *anm);
+    void BuildSpriteDecoys(i32 anmIdx);
+    bool loadTextureClampToEdge;
+#endif
     void TakeScreenshotIfRequested();
     void TakeScreenshot(i32 textureId, i32 left, i32 top, i32 width, i32 height);
 

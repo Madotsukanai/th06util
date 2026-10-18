@@ -540,6 +540,13 @@ void GameWindow::Present()
 {
 #ifdef USE_VULKAN
     g_Renderer->Present();
+    // The pause/continue menus draw a dimmed snapshot of the just-presented
+    // frame as their background, captured into a texture via CaptureScreen.
+    // The D3D path does this after Present() (see #else); the Vulkan path must
+    // do the same, otherwise the menu background is never filled and the live
+    // (undimmed) scene shows through.
+    g_AnmManager->TakeScreenshotIfRequested();
+    Screenshot_SaveIfRequested();
     return;
 #else
     RECT sourceRect;
@@ -1359,6 +1366,10 @@ i32 GameWindow::InitD3dRendering(void)
         return 1;
     }
     g_Supervisor.d3dDevice = GetDummyD3DDevice();
+    // The pause/continue menus draw their dimmed background from a screenshot
+    // of the presented frame (captured via CaptureScreen), so behave like a
+    // D3D lockable-backbuffer device here.
+    g_Supervisor.lockableBackbuffer = 1;
 
     float half_width = (float)GAME_WINDOW_WIDTH / 2.0f;
     float half_height = (float)GAME_WINDOW_HEIGHT / 2.0f;

@@ -2,7 +2,10 @@
 #include "GameWindow.hpp"
 #include "Supervisor.hpp"
 #include "i18n.hpp"
+#include "render/renderer.hpp"
 #include <stdlib.h>
+#include <cstdint>
+#include <vector>
 
 namespace th06
 {
@@ -295,8 +298,12 @@ void TextHelper::RenderTextToTexture(i32 xPos, i32 yPos, i32 spriteWidth, i32 sp
     font = CreateFontW(fontHeight * 2, 0, 0, 0, FW_BOLD, false, false, false, SHIFTJIS_CHARSET, OUT_DEFAULT_PRECIS,
                        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FF_ROMAN | FIXED_PITCH, faceName);
     TextHelper textHelper;
+#ifdef USE_VULKAN
+    textHelper.AllocateBufferWithFallback(GAME_WINDOW_WIDTH, TEXT_BUFFER_HEIGHT, D3DFMT_A1R5G5B5);
+#else
     g_TextBufferSurface->GetDesc(&textSurfaceDesc);
     textHelper.AllocateBufferWithFallback(textSurfaceDesc.Width, textSurfaceDesc.Height, textSurfaceDesc.Format);
+#endif
     hdc = textHelper.hdc;
     h = SelectObject(hdc, font);
     textHelper.InvertAlpha(0, 0, spriteWidth * 2, fontHeight * 2 + 6);
@@ -318,6 +325,35 @@ void TextHelper::RenderTextToTexture(i32 xPos, i32 yPos, i32 spriteWidth, i32 sp
 
     SelectObject(hdc, h);
     textHelper.InvertAlpha(0, 0, spriteWidth * 2, fontHeight * 2 + 6);
+#ifdef USE_VULKAN
+    SelectObject(hdc, h);
+    DeleteObject(font);
+    {
+        TextureHandle tex = (TextureHandle)(uintptr_t)outTexture;
+        i32 srcW = spriteWidth * 2 - 2;
+        i32 srcH = fontHeight * 2 - 2;
+        if (tex != INVALID_TEXTURE && srcW > 0 && srcH > 0 && textHelper.buffer != NULL)
+        {
+            std::vector<uint32_t> argb((size_t)srcW * (size_t)srcH, 0);
+            for (i32 yy = 0; yy < srcH; yy++)
+            {
+                const uint16_t *row =
+                    (const uint16_t *)(textHelper.buffer + (size_t)yy * textHelper.imageWidthInBytes);
+                for (i32 xx = 0; xx < srcW; xx++)
+                {
+                    uint16_t p = row[xx];
+                    uint32_t a = ((p >> 15) & 1) ? 0xFFu : 0x00u;
+                    uint32_t r = (uint32_t)(((p >> 10) & 0x1F) * 255 / 31);
+                    uint32_t g = (uint32_t)(((p >> 5) & 0x1F) * 255 / 31);
+                    uint32_t b = (uint32_t)((p & 0x1F) * 255 / 31);
+                    argb[(size_t)yy * (size_t)srcW + (size_t)xx] = (a << 24) | (r << 16) | (g << 8) | b;
+                }
+            }
+            g_Renderer->BlitPixelsToTexture(tex, 0, yPos, spriteWidth, 16, argb.data(), srcW, srcH);
+        }
+    }
+    return;
+#else
     textHelper.CopyTextToSurface(g_TextBufferSurface);
     SelectObject(hdc, h);
     DeleteObject(font);
@@ -337,6 +373,7 @@ void TextHelper::RenderTextToTexture(i32 xPos, i32 yPos, i32 spriteWidth, i32 sp
         destSurface = NULL;
     }
     return;
+#endif
 }
 
 void th06::TextHelper::ReleaseTextBuffer()

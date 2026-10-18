@@ -1,8 +1,36 @@
 #include "platform_sdl.hpp"
 #include <SDL2/SDL_vulkan.h>
 #include <cstdio>
+#include <string>
+#include <windows.h>
 
 namespace th06 {
+
+// The game's i18n strings (including TH_WINDOW_TITLE) are Shift-JIS encoded
+// because the original engine renders text with a Shift-JIS font. SDL, however,
+// expects UTF-8 window titles, so convert before handing the title over.
+static std::string ShiftJisToUtf8(const char* sjis) {
+    if (sjis == nullptr) {
+        return std::string();
+    }
+    int wideLen = MultiByteToWideChar(932, 0, sjis, -1, nullptr, 0);
+    if (wideLen <= 0) {
+        return std::string(sjis);
+    }
+    std::wstring wide(static_cast<size_t>(wideLen), L'\0');
+    MultiByteToWideChar(932, 0, sjis, -1, &wide[0], wideLen);
+
+    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (utf8Len <= 0) {
+        return std::string(sjis);
+    }
+    std::string utf8(static_cast<size_t>(utf8Len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, &utf8[0], utf8Len, nullptr, nullptr);
+    if (!utf8.empty() && utf8.back() == '\0') {
+        utf8.pop_back();
+    }
+    return utf8;
+}
 
 // Touhou button bitmasks (from Controller.hpp)
 constexpr uint16_t BTN_SHOOT      = 0x0001;
@@ -35,8 +63,10 @@ bool PlatformWindow::Initialize(const WindowConfig& config) {
         flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     }
 
+    std::string utf8Title = ShiftJisToUtf8(config.title);
+
     window_ = SDL_CreateWindow(
-        config.title,
+        utf8Title.c_str(),
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         config.width,

@@ -13,11 +13,22 @@ layout(push_constant) uniform PushConstants {
     vec4 fogColor;
     vec2 fogDist; // x=near, y=far
     float fogEnable;
+    float colorOpAdd; // 1.0 = D3DTOP_ADD (flash), 0.0 = D3DTOP_MODULATE
 } pc;
 
 void main() {
     vec4 texColor = texture(texSampler, fragTexCoord);
-    vec4 col = texColor * fragColor;
+    vec4 col;
+    if (pc.colorOpAdd > 0.5) {
+        col = vec4(clamp(texColor.rgb + fragColor.rgb, 0.0, 1.0), texColor.a * fragColor.a);
+    } else {
+        col = texColor * fragColor;
+    }
+
+    // D3DRS_ALPHATEST: ALPHAREF = 4, ALPHAFUNC = GREATEREQUAL
+    if (col.a < 3.5 / 255.0) {
+        discard;
+    }
 
     if (pc.fogEnable > 0.5 && pc.fogDist.y > pc.fogDist.x) {
         float fogFactor = clamp((pc.fogDist.y - fragDist) / (pc.fogDist.y - pc.fogDist.x), 0.0, 1.0);

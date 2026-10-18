@@ -18,6 +18,8 @@ ALLOWED_DLLS = {
     "oleaut32.dll", "advapi32.dll", "imm32.dll", "ws2_32.dll", "iphlpapi.dll",
     "winmm.dll", "msvcrt.dll", "bcrypt.dll", "comctl32.dll", "comdlg32.dll",
     "d3d8.dll", "dinput8.dll", "dsound.dll", "dxerr8.dll",
+    # OS-provided DLLs pulled in by the statically-linked SDL2 (Vulkan backend).
+    "version.dll", "setupapi.dll", "cfgmgr32.dll",
 }
 # D3DX8 はバージョン違い（d3dx8d.dll など）があるので前方一致で許可する。
 ALLOWED_PREFIXES = ("d3dx8",)

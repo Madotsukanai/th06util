@@ -170,9 +170,13 @@ ZunResult AnmManager::LoadTexture(i32 textureIdx, char *textureName, i32 texture
         return ZUN_ERROR;
     }
 
+    // (USE_VULKAN) loadTextureClampToEdge is set by LoadAnm before calling this
+    // for textures whose sprites reach the texture border.
 #ifdef USE_VULKAN
     {
-        TextureHandle handle = g_Renderer->CreateTextureFromMemory(this->imageDataArray[textureIdx], g_LastFileSize, colorKey);
+        TextureHandle handle =
+            g_Renderer->CreateTextureFromMemory(this->imageDataArray[textureIdx], g_LastFileSize, colorKey, this->loadTextureClampToEdge);
+        utils::DbgLog("[VkT] LoadTexture idx=%d name=%s handle=%zu", textureIdx, textureName, (size_t)handle);
         this->textures[textureIdx] = (IDirect3DTexture8 *)(uintptr_t)handle;
         if (handle == INVALID_TEXTURE)
         {
@@ -266,6 +270,71 @@ ZunResult AnmManager::LoadTextureAlphaChannel(i32 textureIdx, char *textureName,
                 // The original copies the source blue channel into the
                 // destination alpha channel (see the D3D path below).
                 dstPixels[i * 4 + 3] = srcPixels[i * 4 + 0];
+            }
+
+            // Alpha bleed: transparent texels keep whatever RGB happened to be
+            // stored in the colour texture (front.png stores red/white/black in
+            // the transparent margins around each sprite). Bilinear filtering
+            // across a sprite edge interpolates that garbage RGB into the
+            // visible edge pixels, producing coloured seams. Dilate the opaque
+            // RGB one texel into the surrounding transparent texels so edge
+            // filtering can only ever pull in the sprite's own colours. The
+            // alpha channel is left alone here; sprite edges that reach a
+            // texture border get CLAMP_TO_EDGE sampling in the renderer, and
+            // interior sprite edges are handled by BuildSpriteDecoys once the
+            // sprite rectangles are known, so that transparent padding inside
+            // a sprite is not turned opaque.
+            {
+                u32 w = dstDesc.width;
+                u32 h = dstDesc.height;
+                for (u32 y = 0; y < h; y++)
+                {
+                    for (u32 x = 0; x < w; x++)
+                    {
+                        u32 i = (y * w + x) * 4;
+                        if (dstPixels[i + 3] != 0)
+                        {
+                            continue;
+                        }
+                        u32 r = 0;
+                        u32 g = 0;
+                        u32 b = 0;
+                        u32 cnt = 0;
+                        for (i32 dy = -1; dy <= 1; dy++)
+                        {
+                            for (i32 dx = -1; dx <= 1; dx++)
+                            {
+                                if (dx == 0 && dy == 0)
+                                {
+                                    continue;
+                                }
+                                u32 nx = (u32)(((i32)x + dx + (i32)w) % (i32)w);
+                                u32 ny = (u32)(((i32)y + dy + (i32)h) % (i32)h);
+                                u32 ni = (ny * w + nx) * 4;
+                                if (dstPixels[ni + 3] != 0)
+                                {
+                                    r += dstPixels[ni + 0];
+                                    g += dstPixels[ni + 1];
+                                    b += dstPixels[ni + 2];
+                                    cnt++;
+                                }
+                            }
+                        }
+                        if (cnt != 0)
+                        {
+                            dstPixels[i + 0] = (u8)(r / cnt);
+                            dstPixels[i + 1] = (u8)(g / cnt);
+                            dstPixels[i + 2] = (u8)(b / cnt);
+                        }
+                    }
+                }
+            }
+            {
+                u32 off = (112 * dstDesc.width + 33) * 4;
+                utils::DbgLog("[ANM] alphaMerge idx=%d src=%ux%u dst=%ux%u dstBGR(33,112)=(%d,%d,%d) dstA=%d srcB=%d",
+                              textureIdx, srcDesc.width, srcDesc.height, dstDesc.width, dstDesc.height,
+                              dstPixels[off + 0], dstPixels[off + 1], dstPixels[off + 2], dstPixels[off + 3],
+                              srcPixels[off + 0]);
             }
         }
         g_Renderer->UnlockTexture(srcTex);
@@ -375,6 +444,38 @@ ZunResult AnmManager::CreateEmptyTexture(i32 textureIdx, u32 width, u32 height, 
     return ZUN_SUCCESS;
 }
 
+#ifdef USE_VULKAN
+// Returns true when any script in the anm drifts UV coordinates over the
+// texture (opcode 27/28). Such textures must keep the REPEAT sampler;
+// clamp-sampling a scrolling sprite would break the seamless wrap.
+bool AnmManager::AnmUsesUvScroll(AnmRawEntry *anm)
+{
+    u32 *scriptTable = anm->spriteOffsets + anm->numSprites;
+    // FileSystem::OpenPath stored the exact size of this file - never scan
+    // past the end of the loaded buffer.
+    u32 fileSize = g_LastFileSize;
+    for (i32 s = 0; s < anm->numScripts; s++)
+    {
+        if (fileSize == 0)
+        {
+            break;
+        }
+        AnmRawInstr *instr = (AnmRawInstr *)((u8 *)anm + scriptTable[2 * s + 1]);
+        // The instruction stride is 8 + size bytes, always positive, so the
+        // file bound guarantees termination (jump targets stay in-stream).
+        while ((u8 *)instr + 8 <= (u8 *)anm + fileSize && (u8 *)instr >= (u8 *)anm)
+        {
+            if (instr->opcode == AnmOpcode_UVScrollX || instr->opcode == AnmOpcode_UVScrollY)
+            {
+                return true;
+            }
+            instr = (AnmRawInstr *)((u8 *)instr->args + instr->argsCount);
+        }
+    }
+    return false;
+}
+#endif
+
 ZunResult AnmManager::LoadAnm(i32 anmIdx, const char *path, i32 spriteIdxOffset)
 {
     this->ReleaseAnm(anmIdx);
@@ -382,8 +483,11 @@ ZunResult AnmManager::LoadAnm(i32 anmIdx, const char *path, i32 spriteIdxOffset)
 
     AnmRawEntry *anm = this->anmFiles[anmIdx];
 
+    utils::DbgLog("[ANM] LoadAnm idx=%d path=%s ptr=%p", anmIdx, path, anm);
+
     if (anm == NULL)
     {
+        utils::DbgLog("[ANM] LoadAnm FAILED idx=%d path=%s", anmIdx, path);
         g_GameErrorContext.Fatal(TH_ERR_ANMMANAGER_SPRITE_CORRUPTED, path);
         return ZUN_ERROR;
     }
@@ -391,6 +495,40 @@ ZunResult AnmManager::LoadAnm(i32 anmIdx, const char *path, i32 spriteIdxOffset)
     anm->textureIdx = anmIdx;
 
     char *anmName = (char *)((u8 *)anm + anm->nameOffset);
+
+    utils::DbgLog("[ANM] LoadAnm idx=%d name=%s w=%d h=%d", anmIdx, anmName, anm->width, anm->height);
+
+#ifdef USE_VULKAN
+    // Decide the sampler wrap mode for this texture now: it is needed by
+    // LoadTexture below, which runs before the sprite decoy / script loops.
+    // Sprites that span a full texture edge-to-edge wrap around with the
+    // REPEAT sampler when bilinear fine sampling reaches past the opposite
+    // edge (visible as dark grid lines around full-texture sprites like the
+    // character select portrait), so such textures use CLAMP_TO_EDGE instead
+    // - unless any script scrolls UVs, which needs REPEAT.
+    {
+        bool anySpriteTouchesBorder = false;
+        u32 *sprOff = anm->spriteOffsets;
+        for (i32 s = 0; s < anm->numSprites; s++, sprOff++)
+        {
+            AnmRawSprite *rawSprite = (AnmRawSprite *)((u8 *)anm + *sprOff);
+            f32 x0 = rawSprite->offset.x;
+            f32 y0 = rawSprite->offset.y;
+            f32 x1 = x0 + rawSprite->size.x;
+            f32 y1 = y0 + rawSprite->size.y;
+            if (x0 <= 0.0f || x1 >= (f32)anm->width || y0 <= 0.0f || y1 >= (f32)anm->height)
+            {
+                anySpriteTouchesBorder = true;
+            }
+        }
+        this->loadTextureClampToEdge = false;
+        if (anySpriteTouchesBorder && !this->AnmUsesUvScroll(anm))
+        {
+            this->loadTextureClampToEdge = true;
+            utils::DbgLog("[ANM] LoadAnm idx=%d border sprites, clamp-to-edge sampler", anmIdx);
+        }
+    }
+#endif
 
     if (*anmName == '@')
     {
@@ -434,6 +572,12 @@ ZunResult AnmManager::LoadAnm(i32 anmIdx, const char *path, i32 spriteIdxOffset)
         this->LoadSprite(rawSprite->id + spriteIdxOffset, &loadedSprite);
     }
 
+#ifdef USE_VULKAN
+    // NOTE: widthPx/heightPx are the same as before (the rectangle size is
+    // unchanged), so the in-game scale of every sprite is preserved.
+    BuildSpriteDecoys(anmIdx);
+#endif
+
     for (index = 0; index < anm->numScripts; index++, curSpriteOffset += 2)
     {
         this->scripts[curSpriteOffset[0] + spriteIdxOffset] = (AnmRawInstr *)((u8 *)anm + curSpriteOffset[1]);
@@ -444,6 +588,354 @@ ZunResult AnmManager::LoadAnm(i32 anmIdx, const char *path, i32 spriteIdxOffset)
 
     return ZUN_SUCCESS;
 }
+
+#ifdef USE_VULKAN
+void AnmManager::BuildSpriteDecoys(i32 anmIdx)
+{
+    static const bool noDecoyDbg = getenv("VKDBG_NO_DECOY") != nullptr;
+    if (noDecoyDbg)
+    {
+        return;
+    }
+
+    // Redirect each sprite's UV rectangle to a copy of its own artwork placed in
+    // a free area of the texture, surrounded by a ring of replicated edge
+    // pixels. At non-integer scales (e.g. 2.25x) the bilinear sampler near a
+    // sprite edge averages in up to one texel beyond the sprite rectangle; with
+    // the ring those texels are copies of the sprite's own edge pixels instead
+    // of unrelated (usually transparent or wrong-coloured) neighbours, so edge
+    // rows/columns no longer darken or pick up red/white spill. Sprites whose
+    // padded copy does not fit in the free texture area keep their original
+    // rectangle so they behave exactly as before.
+
+    AnmRawEntry *anm = this->anmFiles[anmIdx];
+    if (anm == NULL || this->textures[anm->textureIdx] == NULL)
+    {
+        return;
+    }
+
+    TextureHandle tex = (TextureHandle)(uintptr_t)this->textures[anm->textureIdx];
+    if (tex == INVALID_TEXTURE)
+    {
+        return;
+    }
+
+    SurfaceDesc desc;
+    if (!g_Renderer->LockTexture(tex, &desc))
+    {
+        return;
+    }
+
+    u8 *px = (u8 *)desc.pixels;
+    u32 w = desc.width;
+    u32 h = desc.height;
+    u32 pixelCount = w * h;
+
+    u8 *used = new u8[pixelCount];
+    u8 *inRect = new u8[pixelCount];
+    for (u32 i = 0; i < pixelCount; i++)
+    {
+        used[i] = (px[i * 4 + 3] != 0) ? 1 : 0;
+    }
+    memset(inRect, 0, pixelCount);
+
+    struct DecoyJob
+    {
+        i32 spriteIdx;
+        i32 sx;
+        i32 sy;
+        i32 sw;
+        i32 sh;
+    };
+
+    DecoyJob *jobs = new DecoyJob[anm->numSprites];
+    i32 numJobs = 0;
+    u32 *curSpriteOffset = anm->spriteOffsets;
+    for (i32 s = 0; s < anm->numSprites; s++, curSpriteOffset++)
+    {
+        AnmRawSprite *rawSprite = (AnmRawSprite *)((u8 *)anm + *curSpriteOffset);
+        f32 fx0 = rawSprite->offset.x;
+        f32 fy0 = rawSprite->offset.y;
+        f32 fw = rawSprite->size.x;
+        f32 fh = rawSprite->size.y;
+        if (fx0 != (f32)(i32)fx0 || fy0 != (f32)(i32)fy0 || fw != (f32)(i32)fw || fh != (f32)(i32)fh || fw <= 0.0f ||
+            fh <= 0.0f)
+        {
+            utils::DbgLog("[ANM] decoy skip sprite=%d non-integer rect", (int)rawSprite->id);
+            continue;
+        }
+        i32 sx0 = (i32)fx0;
+        i32 sy0 = (i32)fy0;
+        i32 sw = (i32)fw;
+        i32 sh = (i32)fh;
+        if (sx0 < 0 || sy0 < 0 || sx0 + sw > (i32)w || sy0 + sh > (i32)h)
+        {
+            utils::DbgLog("[ANM] decoy skip sprite=%d rect out of bounds", (int)rawSprite->id);
+            continue;
+        }
+        for (i32 y = sy0; y < sy0 + sh; y++)
+        {
+            for (i32 x = sx0; x < sx0 + sw; x++)
+            {
+                inRect[y * w + x] = 1;
+            }
+        }
+        jobs[numJobs].spriteIdx = (i32)(rawSprite->id + anm->spriteIdxOffset);
+        jobs[numJobs].sx = sx0;
+        jobs[numJobs].sy = sy0;
+        jobs[numJobs].sw = sw;
+        jobs[numJobs].sh = sh;
+        numJobs++;
+    }
+
+    // Greedy allocation order: tallest / largest sprites first, so compact
+    // requirements claim the limited tall free windows before the space
+    // fragments into short bands.
+    for (i32 i = 1; i < numJobs; i++)
+    {
+        DecoyJob key = jobs[i];
+        i32 j = i - 1;
+        while (j >= 0 && (jobs[j].sw * jobs[j].sh < key.sw * key.sh ||
+                          (jobs[j].sw * jobs[j].sh == key.sw * key.sh && jobs[j].sh < key.sh)))
+        {
+            jobs[j + 1] = jobs[j];
+            j--;
+        }
+        jobs[j + 1] = key;
+    }
+
+    // Per-column running counts of `used` texels inside the candidate window
+    // rows, rebuilt as the window slides down the texture one row at a time.
+    i32 iw = (i32)w;
+    i32 ih = (i32)h;
+    u32 *usedCol = new u32[iw];
+    u32 *rectCol = new u32[iw];
+    u32 *rectPrefix = new u32[iw + 1];
+
+    i32 placedCount = 0;
+    for (i32 jobIdx = 0; jobIdx < numJobs; jobIdx++)
+    {
+        DecoyJob *job = &jobs[jobIdx];
+        i32 bw = job->sw + 2;
+        i32 bh = job->sh + 2;
+        if (bw > iw || bh > ih)
+        {
+            continue;
+        }
+
+        i32 findX = -1;
+        i32 findY = -1;
+        for (i32 y = 0; y + bh <= ih && findX < 0; y++)
+        {
+            // used counts over rows y .. y+bh-1; rect counts over the expanded
+            // span y-1 .. y+bh (for the neighbouring-rect check)
+            if (y == 0)
+            {
+                for (i32 x = 0; x < iw; x++)
+                {
+                    u32 c = 0;
+                    for (i32 r = 0; r < bh; r++)
+                    {
+                        c += used[r * iw + x];
+                    }
+                    usedCol[x] = c;
+                    u32 rc = 0;
+                    for (i32 r = 0; r <= bh && r < ih; r++)
+                    {
+                        rc += inRect[r * iw + x];
+                    }
+                    rectCol[x] = rc;
+                }
+            }
+            else
+            {
+                for (i32 x = 0; x < iw; x++)
+                {
+                    usedCol[x] += used[(y + bh - 1) * iw + x];
+                    usedCol[x] -= used[(y - 1) * iw + x];
+                    // rect window for candidate y is rows y-1 .. y+bh; the
+                    // window for y-1 was rows y-2 .. y-1+bh
+                    i32 r0 = y - 2;
+                    i32 r1 = y + bh;
+                    if (r0 >= 0)
+                    {
+                        rectCol[x] -= inRect[r0 * iw + x];
+                    }
+                    if (r1 < ih)
+                    {
+                        rectCol[x] += inRect[r1 * iw + x];
+                    }
+                }
+            }
+
+            // prefix sums over inRect counts for the expanded (ring+1) block
+            rectPrefix[0] = 0;
+            for (i32 x = 0; x < iw; x++)
+            {
+                rectPrefix[x + 1] = rectPrefix[x] + rectCol[x];
+            }
+
+            i32 run = 0;
+            for (i32 x = 0; x + bw <= iw && findX < 0; x++)
+            {
+                if (usedCol[x] == 0)
+                {
+                    run++;
+                }
+                else
+                {
+                    run = 0;
+                    continue;
+                }
+                if (run < bw)
+                {
+                    continue;
+                }
+                // candidate left edge; the strict check requires the block and
+                // one texel around it to contain no other sprite's rectangle
+                i32 x0 = x - bw + 1;
+                u32 rsum = rectPrefix[x0 + bw + 1 > iw ? iw : x0 + bw + 1];
+                u32 rsub = rectPrefix[x0 - 1 < 0 ? 0 : x0 - 1];
+                if (rsum - rsub == 0)
+                {
+                    findX = x0;
+                    findY = y;
+                }
+            }
+        }
+
+        if (findX < 0)
+        {
+            utils::DbgLog("[ANM] decoy skip sprite=%d rect=(%d,%d,%d,%d) no space", job->spriteIdx, job->sx, job->sy,
+                          job->sw, job->sh);
+            continue;
+        }
+
+        i32 dx = findX;
+        i32 dy = findY;
+
+        // interior copy
+        for (i32 r = 0; r < job->sh; r++)
+        {
+            u8 *d = px + ((dy + 1 + r) * iw + (dx + 1)) * 4;
+            u8 *s = px + ((job->sy + r) * iw + job->sx) * 4;
+            for (i32 c = 0; c < job->sw; c++)
+            {
+                d[c * 4 + 0] = s[c * 4 + 0];
+                d[c * 4 + 1] = s[c * 4 + 1];
+                d[c * 4 + 2] = s[c * 4 + 2];
+                d[c * 4 + 3] = s[c * 4 + 3];
+            }
+        }
+
+        // horizontal rings: copy of the top/bottom interior rows
+        for (i32 c = 0; c < job->sw; c++)
+        {
+            u8 *top = px + (dy * iw + dx + 1 + c) * 4;
+            u8 *firstRow = px + ((dy + 1) * iw + dx + 1 + c) * 4;
+            u8 *lastRow = px + ((dy + job->sh) * iw + dx + 1 + c) * 4;
+            top[0] = firstRow[0];
+            top[1] = firstRow[1];
+            top[2] = firstRow[2];
+            top[3] = firstRow[3];
+
+            u8 *bot = px + ((dy + bh - 1) * iw + dx + 1 + c) * 4;
+            bot[0] = lastRow[0];
+            bot[1] = lastRow[1];
+            bot[2] = lastRow[2];
+            bot[3] = lastRow[3];
+        }
+
+        // vertical rings: copy of the left/right interior columns
+        for (i32 r = 0; r < job->sh; r++)
+        {
+            u8 *left = px + ((dy + 1 + r) * iw + dx) * 4;
+            u8 *firstCol = px + ((dy + 1 + r) * iw + dx + 1) * 4;
+            u8 *lastCol = px + ((dy + 1 + r) * iw + dx + job->sw) * 4;
+            left[0] = firstCol[0];
+            left[1] = firstCol[1];
+            left[2] = firstCol[2];
+            left[3] = firstCol[3];
+
+            u8 *right = px + ((dy + 1 + r) * iw + dx + bw - 1) * 4;
+            right[0] = lastCol[0];
+            right[1] = lastCol[1];
+            right[2] = lastCol[2];
+            right[3] = lastCol[3];
+        }
+
+        // corners
+        u8 *cTL = px + (dy * iw + dx) * 4;
+        u8 *cTLsrc = px + ((dy + 1) * iw + dx + 1) * 4;
+        u8 *cTR = px + (dy * iw + dx + bw - 1) * 4;
+        u8 *cTRsrc = px + ((dy + 1) * iw + dx + job->sw) * 4;
+        u8 *cBL = px + ((dy + bh - 1) * iw + dx) * 4;
+        u8 *cBLsrc = px + ((dy + job->sh) * iw + dx + 1) * 4;
+        u8 *cBR = px + ((dy + bh - 1) * iw + dx + bw - 1) * 4;
+        u8 *cBRsrc = px + ((dy + job->sh) * iw + dx + job->sw) * 4;
+        for (i32 c = 0; c < 4; c++)
+        {
+            cTL[c] = cTLsrc[c];
+            cTR[c] = cTRsrc[c];
+            cBL[c] = cBLsrc[c];
+            cBR[c] = cBRsrc[c];
+        }
+
+        // mark the decoy (including its ring) as used for subsequent placements
+        for (i32 r = -1; r <= job->sh; r++)
+        {
+            for (i32 c = -1; c <= job->sw; c++)
+            {
+                used[(dy + 1 + r) * iw + dx + 1 + c] = 1;
+            }
+        }
+
+        // redirect the sprite rectangle to the decoy interior
+        AnmLoadedSprite *sp = &this->sprites[job->spriteIdx];
+        sp->startPixelInclusive.x = (f32)(dx + 1);
+        sp->startPixelInclusive.y = (f32)(dy + 1);
+        sp->endPixelInclusive.x = (f32)(dx + 1 + job->sw);
+        sp->endPixelInclusive.y = (f32)(dy + 1 + job->sh);
+        sp->uvStart.x = sp->startPixelInclusive.x / sp->textureWidth;
+        sp->uvEnd.x = sp->endPixelInclusive.x / sp->textureWidth;
+        sp->uvStart.y = sp->startPixelInclusive.y / sp->textureHeight;
+        sp->uvEnd.y = sp->endPixelInclusive.y / sp->textureHeight;
+
+        utils::DbgLog("[ANM] decoy sprite=%d idx=%d rect=(%d,%d,%d,%d) -> decoy=(%d,%d) %dx%d", job->spriteIdx,
+                      job->spriteIdx, job->sx, job->sy, job->sw, job->sh, dx, dy, job->sw, job->sh);
+        placedCount++;
+    }
+
+    utils::DbgLog("[ANM] decoy summary idx=%d placed=%d total=%d", anmIdx, placedCount, numJobs);
+
+    if (anmIdx == 1 || anmIdx == 2)
+    {
+        for (i32 k = 111; k <= 113; k++)
+        {
+            AnmLoadedSprite *dsp = &this->sprites[k + anm->spriteIdxOffset];
+            utils::DbgLog("[ANM] final sprite=%d uvStart=(%.5f,%.5f) uvEnd=(%.5f,%.5f)", k, dsp->uvStart.x,
+                          dsp->uvStart.y, dsp->uvEnd.x, dsp->uvEnd.y);
+        }
+        char dumpPath[64];
+        snprintf(dumpPath, sizeof(dumpPath), "anm%d_engine.bin", anmIdx);
+        FILE *fp = fopen(dumpPath, "wb");
+        if (fp != NULL)
+        {
+            fwrite(px, 1, (size_t)w * h * 4, fp);
+            fclose(fp);
+        }
+    }
+
+    delete[] used;
+    delete[] inRect;
+    delete[] usedCol;
+    delete[] rectCol;
+    delete[] rectPrefix;
+    delete[] jobs;
+
+    g_Renderer->UnlockTexture(tex);
+}
+#endif
 
 void AnmManager::ReleaseAnm(i32 anmIdx)
 {
@@ -704,6 +1196,14 @@ ZunResult AnmManager::DrawInner(AnmVm *vm, i32 param_3)
     }
     BlendMode blend = (vm->flags.blendMode == AnmVmBlendMode_InvSrcAlpha) ? BLEND_ALPHA : BLEND_ADD;
     TextureHandle tex = (TextureHandle)(uintptr_t)this->textures[vm->sprite->sourceFileIndex];
+    {
+        ptrdiff_t spi = vm->sprite - this->sprites;
+        if (spi >= 108 && spi <= 118)
+        {
+            utils::DbgLog("[ANM] draw idx=%d uv=(%.5f,%.5f)-(%.5f,%.5f) tex=%zu col=%08x", (int)spi, v2d[0].u, v2d[0].v,
+                          v2d[3].u, v2d[3].v, (size_t)tex, (unsigned)vm->color);
+        }
+    }
     g_Renderer->DrawQuad2D(tex, v2d, blend);
     return ZUN_SUCCESS;
 #else
@@ -1539,6 +2039,25 @@ void AnmManager::DrawStringFormat2(AnmManager *mgr, AnmVm *vm, ZunColor textColo
 
 ZunResult AnmManager::LoadSurface(i32 surfaceIdx, char *path)
 {
+#ifdef USE_VULKAN
+    u8 *data = FileSystem::OpenPath(path, 0);
+    if (data == NULL)
+    {
+        g_GameErrorContext.Fatal(TH_ERR_CANNOT_BE_LOADED, path);
+        return ZUN_ERROR;
+    }
+    uint32_t width = 0;
+    uint32_t height = 0;
+    bool ok = g_Renderer->LoadSurfaceImage(surfaceIdx, data, g_LastFileSize, &width, &height);
+    free(data);
+    if (!ok)
+    {
+        return ZUN_ERROR;
+    }
+    this->surfaceSourceInfo[surfaceIdx].Width = width;
+    this->surfaceSourceInfo[surfaceIdx].Height = height;
+    return ZUN_SUCCESS;
+#else
     if (this->surfaces[surfaceIdx] != NULL)
     {
         this->ReleaseSurface(surfaceIdx);
@@ -1607,10 +2126,17 @@ fail:
     }
     free(data);
     return ZUN_ERROR;
+#endif
 }
 
 void AnmManager::ReleaseSurface(i32 surfaceIdx)
 {
+#ifdef USE_VULKAN
+    g_Renderer->ReleaseSurfaceImage(surfaceIdx);
+    this->surfaces[surfaceIdx] = NULL;
+    this->surfacesBis[surfaceIdx] = NULL;
+    return;
+#else
     if (this->surfaces[surfaceIdx] != NULL)
     {
         this->surfaces[surfaceIdx]->Release();
@@ -1621,10 +2147,17 @@ void AnmManager::ReleaseSurface(i32 surfaceIdx)
         this->surfacesBis[surfaceIdx]->Release();
         this->surfacesBis[surfaceIdx] = NULL;
     }
+#endif
 }
 
 void AnmManager::CopySurfaceToBackBuffer(i32 surfaceIdx, i32 left, i32 top, i32 x, i32 y)
 {
+#ifdef USE_VULKAN
+    g_Renderer->DrawSurfaceRegion(surfaceIdx, x, y, left, top,
+                                  (i32)this->surfaceSourceInfo[surfaceIdx].Width - left,
+                                  (i32)this->surfaceSourceInfo[surfaceIdx].Height - top);
+    return;
+#else
     if (this->surfacesBis[surfaceIdx] == NULL)
     {
         return;
@@ -1673,10 +2206,15 @@ void AnmManager::CopySurfaceToBackBuffer(i32 surfaceIdx, i32 left, i32 top, i32 
     destPoint.y = y;
     g_Supervisor.d3dDevice->CopyRects(this->surfaces[surfaceIdx], &sourceRect, 1, destSurface, &destPoint);
     destSurface->Release();
+#endif
 }
 
 void AnmManager::DrawEndingRect(i32 surfaceIdx, i32 rectX, i32 rectY, i32 rectLeft, i32 rectTop, i32 width, i32 height)
 {
+#ifdef USE_VULKAN
+    g_Renderer->DrawSurfaceRegion(surfaceIdx, rectX, rectY, rectLeft, rectTop, width, height);
+    return;
+#else
     if (this->surfacesBis[surfaceIdx] == NULL)
     {
         return;
@@ -1721,10 +2259,20 @@ void AnmManager::DrawEndingRect(i32 surfaceIdx, i32 rectX, i32 rectY, i32 rectLe
     point.y = rectY;
     g_Supervisor.d3dDevice->CopyRects(this->surfaces[surfaceIdx], &rect, 1, D3D_Surface, &point);
     D3D_Surface->Release();
+#endif
 }
 
 void AnmManager::TakeScreenshot(i32 textureId, i32 left, i32 top, i32 width, i32 height)
 {
+#ifdef USE_VULKAN
+    TextureHandle tex = (TextureHandle)(uintptr_t)this->textures[textureId];
+    if (tex == INVALID_TEXTURE)
+    {
+        return;
+    }
+    g_Renderer->CaptureScreen(tex, left, top, width, height);
+    return;
+#else
     LPDIRECT3DSURFACE8 sourceSurface;
     LPDIRECT3DSURFACE8 destSurface;
     RECT rect;
@@ -1762,5 +2310,6 @@ void AnmManager::TakeScreenshot(i32 textureId, i32 left, i32 top, i32 width, i32
     destSurface->Release();
     sourceSurface->Release();
     return;
+#endif
 }
 }; // namespace th06

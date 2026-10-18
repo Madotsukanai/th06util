@@ -15,11 +15,15 @@
 #include "Supervisor.hpp"
 #include "ZunColor.hpp"
 #include "inttypes.hpp"
+#include "render/renderer.hpp"
 
 namespace th06
 {
 namespace QuickSettings
 {
+// th06util としてのバージョン（ゲーム本体のバージョン 1.02 とは別）。
+#define TH06UTIL_VERSION "1.12"
+
 enum ItemKind
 {
     KIND_TOGGLE,
@@ -233,6 +237,22 @@ static TextRow s_rows[QS_ROWS];
 
 static bool EnsureAtlas()
 {
+#ifdef USE_VULKAN
+    if (s_atlasTex != NULL)
+    {
+        g_AnmManager->textures[QS_TEX_SLOT] = s_atlasTex;
+        return true;
+    }
+
+    TextureHandle atlasHandle = g_Renderer->CreateTexture(QS_TEX_W, QS_TEX_H);
+    if (atlasHandle == INVALID_TEXTURE)
+    {
+        return false;
+    }
+    s_atlasTex = (IDirect3DTexture8 *)(uintptr_t)atlasHandle;
+    s_atlasDevice = g_Supervisor.d3dDevice;
+    g_AnmManager->textures[QS_TEX_SLOT] = s_atlasTex;
+#else
     if (s_atlasTex != NULL && s_atlasDevice == g_Supervisor.d3dDevice)
     {
         g_AnmManager->textures[QS_TEX_SLOT] = s_atlasTex;
@@ -262,6 +282,7 @@ static bool EnsureAtlas()
     s_atlasTex = tex;
     s_atlasDevice = g_Supervisor.d3dDevice;
     g_AnmManager->textures[QS_TEX_SLOT] = tex;
+#endif
 
     for (i32 row = 0; row < QS_ROWS; row++)
     {
@@ -418,7 +439,9 @@ enum MainMenuIndex
     MAIN_MENU_AUDIO,
     MAIN_MENU_INPUT,
     MAIN_MENU_SYSTEM,
-    MAIN_MENU_COUNT
+    MAIN_MENU_COUNT,
+    // 表示専用のバージョン行（選択対象にはしない）。
+    MAIN_MENU_VERSION = MAIN_MENU_COUNT,
 };
 
 static Screen s_screen = SCREEN_MAIN;
@@ -1306,7 +1329,8 @@ void Draw()
     switch (s_screen)
     {
     case SCREEN_MAIN:
-        count = MAIN_MENU_COUNT;
+        // 最後に表示専用のバージョン行を追加する。
+        count = MAIN_MENU_COUNT + 1;
         cursorRow = s_mainCursor;
         break;
     case SCREEN_DISPLAY:
@@ -1399,6 +1423,8 @@ void Draw()
     static char mainAudioLabel[32];
     static char mainInputLabel[32];
     static char mainSystemLabel[32];
+    static char mainVersionLabel[32];
+    static char mainVersionValue[32];
 
     static char mainHint1Sjis[64];
     static char mainHint2Sjis[64];
@@ -1436,6 +1462,12 @@ void Draw()
         ToSjis(L"音声", mainAudioLabel, (i32)sizeof(mainAudioLabel));
         ToSjis(L"操作", mainInputLabel, (i32)sizeof(mainInputLabel));
         ToSjis(L"システム", mainSystemLabel, (i32)sizeof(mainSystemLabel));
+        ToSjis(L"バージョン", mainVersionLabel, (i32)sizeof(mainVersionLabel));
+#ifdef USE_VULKAN
+        snprintf(mainVersionValue, sizeof(mainVersionValue), "%s on Vulkan", TH06UTIL_VERSION);
+#else
+        snprintf(mainVersionValue, sizeof(mainVersionValue), "%s on DirectX 8", TH06UTIL_VERSION);
+#endif
 
         ToSjis(L"↑↓:選択 →:決定", mainHint1Sjis, (i32)sizeof(mainHint1Sjis));
         ToSjis(L"F1/Esc:閉じる", mainHint2Sjis, (i32)sizeof(mainHint2Sjis));
@@ -1523,6 +1555,11 @@ void Draw()
             case MAIN_MENU_SYSTEM:
                 labelText = mainSystemLabel;
                 break;
+            case MAIN_MENU_VERSION:
+                // 表示専用（選択不可）。
+                DrawText(QS_ROW_LABEL + i, labelX, y, mainVersionLabel, normalColor, shadow);
+                DrawText(QS_ROW_VALUE + i, valueX, y, mainVersionValue, hintColor, shadow);
+                continue;
             }
             if (selected)
             {
