@@ -15,6 +15,7 @@
 #include "Player.hpp"
 #include "QuickSettings.hpp"
 #include "ReplayManager.hpp"
+#include "render/renderer.hpp"
 #include "ResultScreen.hpp"
 #include "Rng.hpp"
 #include "Screenshot.hpp"

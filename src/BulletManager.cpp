@@ -13,6 +13,9 @@
 #include "ZunColor.hpp"
 #include "ZunMath.hpp"
 #include "utils.hpp"
+#ifdef USE_VULKAN
+#include "renderer.hpp"
+#endif
 
 namespace th06
 {
@@ -650,6 +653,40 @@ static void RecordLaserHitbox(i32 idx, f32 mid, D3DXVECTOR3 *size)
     }
 }
 
+#ifdef USE_VULKAN
+// Thick line segments render the same outline a D3D8 LINESTRIP would: each
+// edge becomes a 2px-wide filled quad through the shared 2D path.
+static void VulkanDrawHitboxThickLine(f32 x0, f32 y0, f32 x1, f32 y1, D3DCOLOR col)
+{
+    const f32 halfW = 1.0f;
+    f32 dx = x1 - x0;
+    f32 dy = y1 - y0;
+    f32 len = sqrtf(dx * dx + dy * dy);
+    f32 nx = 0.0f;
+    f32 ny = 0.0f;
+    if (len > 0.0001f)
+    {
+        nx = -dy / len;
+        ny = dx / len;
+    }
+    TextureHandle white = g_Renderer->GetWhiteTexture();
+    Vertex2D q[4];
+    q[0] = { x0 + nx * halfW, y0 + ny * halfW, 0.0f, 0.0f, col, 0.0f };
+    q[1] = { x1 + nx * halfW, y1 + ny * halfW, 0.0f, 0.0f, col, 0.0f };
+    q[2] = { x0 - nx * halfW, y0 - ny * halfW, 0.0f, 0.0f, col, 0.0f };
+    q[3] = { x1 - nx * halfW, y1 - ny * halfW, 0.0f, 0.0f, col, 0.0f };
+    g_Renderer->DrawQuad2D(white, q, BLEND_ALPHA);
+}
+
+static void VulkanDrawHitboxRectOutline(f32 x0, f32 y0, f32 x1, f32 y1, D3DCOLOR col)
+{
+    VulkanDrawHitboxThickLine(x0, y0, x1, y0, col);
+    VulkanDrawHitboxThickLine(x1, y0, x1, y1, col);
+    VulkanDrawHitboxThickLine(x1, y1, x0, y1, col);
+    VulkanDrawHitboxThickLine(x0, y1, x0, y0, col);
+}
+#endif
+
 static void DrawBulletHitboxes(BulletManager *mgr)
 {
     struct HitDispVertex
@@ -657,6 +694,58 @@ static void DrawBulletHitboxes(BulletManager *mgr)
         f32 x, y, z, rhw;
         DWORD color;
     };
+
+#ifdef USE_VULKAN
+    // Ported hitbox overlay: everything is drawn through the shared 2D path,
+    // so none of the D3D8 state save/restore below applies here.
+    {
+        Bullet *bullet = &mgr->bullets[0];
+        for (i32 idx = 0; idx < ARRAY_SIZE_SIGNED(mgr->bullets); idx++, bullet++)
+        {
+            if (bullet->state != 1)
+            {
+                continue;
+            }
+            f32 cx = g_GameManager.arcadeRegionTopLeftPos.x + bullet->pos.x;
+            f32 cy = g_GameManager.arcadeRegionTopLeftPos.y + bullet->pos.y;
+            f32 hw = bullet->sprites.grazeSize.x / 2.0f;
+            f32 hh = bullet->sprites.grazeSize.y / 2.0f;
+            VulkanDrawHitboxRectOutline(cx - hw, cy - hh, cx + hw, cy + hh, 0xffff0000);
+        }
+
+        Laser *laser = &mgr->lasers[0];
+        for (i32 idx = 0; idx < ARRAY_SIZE_SIGNED(mgr->lasers); idx++, laser++)
+        {
+            if (!laser->inUse || idx >= 256 || !s_laserHit[idx].valid)
+            {
+                continue;
+            }
+            f32 hx = s_laserHit[idx].sizeX / 2.0f + g_Player.hitboxSize.x;
+            f32 hy = s_laserHit[idx].sizeY / 2.0f + g_Player.hitboxSize.y;
+            f32 mid = s_laserHit[idx].mid;
+            f32 lc = cosf(laser->angle);
+            f32 ls = sinf(laser->angle);
+            f32 ox = g_GameManager.arcadeRegionTopLeftPos.x + laser->pos.x;
+            f32 oy = g_GameManager.arcadeRegionTopLeftPos.y + laser->pos.y;
+            static const f32 cornerX[5] = {-1.0f, 1.0f, 1.0f, -1.0f, -1.0f};
+            static const f32 cornerY[5] = {-1.0f, -1.0f, 1.0f, 1.0f, -1.0f};
+            f32 px[5];
+            f32 py[5];
+            for (i32 i = 0; i < 5; i++)
+            {
+                f32 lx = mid + cornerX[i] * hx;
+                f32 ly = cornerY[i] * hy;
+                px[i] = ox + lc * lx - ls * ly;
+                py[i] = oy + ls * lx + lc * ly;
+            }
+            for (i32 i = 0; i < 4; i++)
+            {
+                VulkanDrawHitboxThickLine(px[i], py[i], px[i + 1], py[i + 1], 0xffff0000);
+            }
+        }
+    }
+    return;
+#endif
 
     DWORD oldLighting, oldAlpha, oldSrc, oldDest, oldZ, oldZWrite, oldZFunc;
     DWORD oldColorOp, oldAlphaOp, oldColorArg1, oldAlphaArg1, oldVertexShader;

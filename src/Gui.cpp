@@ -31,7 +31,11 @@ Gui g_Gui;
 ChainElem g_GuiCalcChain;
 ChainElem g_GuiDrawChain;
 
+#ifdef USE_VULKAN
+static TextureHandle s_diffTexture = 0;
+#else
 static IDirect3DTexture8 *s_diffTexture = NULL;
+#endif
 static bool s_diffTextureLoaded = false;
 static void EnsureDiffTextureLoaded();
 static void DrawDifficultyLabel(const RECT &r);
@@ -529,9 +533,13 @@ static void EnsureDiffTextureLoaded()
         void *data = LockResource(hGlobal);
         if (data != NULL && size > 0)
         {
+#ifdef USE_VULKAN
+            s_diffTexture = g_Renderer->CreateTextureFromMemory(data, size);
+#else
             D3DXCreateTextureFromFileInMemoryEx(g_Supervisor.d3dDevice, data, size, D3DX_DEFAULT, D3DX_DEFAULT, 1, 0,
                                                 D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, D3DX_FILTER_NONE, D3DX_DEFAULT, 0,
                                                 NULL, NULL, &s_diffTexture);
+#endif
         }
     }
 }
@@ -551,6 +559,19 @@ static void DrawDifficultyLabel(const RECT &r)
     float x1 = x0 + info.w;
     float y0 = cy - info.h * 0.5f;
     float y1 = y0 + info.h;
+
+#ifdef USE_VULKAN
+    // Ported difficulty label: same quad, drawn through the shared 2D path.
+    {
+        Vertex2D v[4];
+        v[0] = {x0 - 0.5f, y0 - 0.5f, info.u0, info.v0, 0xFFFFFFFF, 0.0f};
+        v[1] = {x1 - 0.5f, y0 - 0.5f, info.u1, info.v0, 0xFFFFFFFF, 0.0f};
+        v[2] = {x0 - 0.5f, y1 - 0.5f, info.u0, info.v1, 0xFFFFFFFF, 0.0f};
+        v[3] = {x1 - 0.5f, y1 - 0.5f, info.u1, info.v1, 0xFFFFFFFF, 0.0f};
+        g_Renderer->DrawQuad2D(s_diffTexture, v, BLEND_ALPHA);
+    }
+    return;
+#endif
 
     DiffVertex v[4];
     v[0].x = x0 - 0.5f;

@@ -9,6 +9,9 @@
 #include "GameWindow.hpp"
 #include "SoundPlayer.hpp"
 #include "Supervisor.hpp"
+#ifdef USE_VULKAN
+#include "render/renderer.hpp"
+#endif
 
 namespace th06
 {
@@ -210,6 +213,37 @@ void Screenshot_SaveIfRequested()
         return;
     s_screenshotRequested = false;
 
+#ifdef USE_VULKAN
+    // Read the presented frame back through the renderer (the dummy backbuffer
+    // never contains the rendered image, so the D3D path would save black).
+    if (g_Renderer == NULL)
+        return;
+
+    std::vector<u32> argb;
+    if (!g_Renderer->ReadGameImage(argb) || argb.empty())
+        return;
+    const u32 width = 640;
+    const u32 height = 480;
+
+    const size_t rawSize = height * (1 + width * 3);
+    u8 *raw = (u8 *)malloc(rawSize);
+    if (raw == NULL)
+        return;
+
+    for (u32 y = 0; y < height; y++)
+    {
+        u8 *dstRow = raw + y * (1 + width * 3);
+        *dstRow++ = 0;
+        const u32 *srcRow = &argb[(size_t)y * width];
+        for (u32 x = 0; x < width; x++)
+        {
+            u32 p = srcRow[x];
+            dstRow[x * 3 + 0] = (u8)((p >> 0) & 0xFF);
+            dstRow[x * 3 + 1] = (u8)((p >> 8) & 0xFF);
+            dstRow[x * 3 + 2] = (u8)((p >> 16) & 0xFF);
+        }
+    }
+#else
     if (g_Supervisor.d3dDevice == NULL)
         return;
 
@@ -310,6 +344,7 @@ void Screenshot_SaveIfRequested()
     if (sysMemSurf != NULL)
         sysMemSurf->Release();
     backbuf->Release();
+#endif
 
     CreateDirectoryA("./snapshot", NULL);
 

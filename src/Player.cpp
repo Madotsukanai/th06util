@@ -187,6 +187,19 @@ void Player::DrawHitboxMarker(Player *p)
 
     const f32 core = 1.41421356f * p->hitboxSize.x;
 
+#ifdef USE_VULKAN
+    // Ported hitbox marker: the fans/rings below run through the shared 2D
+    // path, so skip the D3D8 state save/restore entirely (the dummy device's
+    // GetTexture doesn't return a real object to Release).
+    DrawHitboxFilledCircle(x, y, 8.7f * scale, 0x18000000);
+    DrawHitboxRing(x, y, 6.0f * scale, 8.2f * scale, 0x48b8b8b8);
+    DrawHitboxRing(x, y, 4.9f * scale, 6.6f * scale, 0x38ffffff);
+    DrawHitboxRing(x, y, core * scale, 5.0f * scale, 0xf0b00000);
+    DrawHitboxFilledCircle(x, y, core * scale, 0xffffffff);
+    DrawHitboxRing(x, y, core * scale, 2.3f * scale, 0xc0ffffff);
+    return;
+#endif
+
     DWORD oldLighting;
     DWORD oldAlpha;
     DWORD oldSrc;

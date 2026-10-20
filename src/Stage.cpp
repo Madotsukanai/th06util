@@ -237,9 +237,7 @@ ChainCallbackResult Stage::OnUpdate(Stage *stage)
 ChainCallbackResult Stage::OnDrawHighPrio(Stage *stage)
 {
 #ifdef USE_VULKAN
-    utils::DbgLog("[STG] OnDrawHighPrio enter");
     g_Renderer->SetFog(true, stage->skyFog.color, stage->skyFog.nearPlane, stage->skyFog.farPlane);
-    utils::DbgLog("[STG] SetFog called col=%08x near=%.1f far=%.1f", stage->skyFog.color, stage->skyFog.nearPlane, stage->skyFog.farPlane);
 #else
     if (stage->skyFogNeedsSetup)
     {
@@ -434,20 +432,16 @@ ZunResult Stage::LoadStageData(char *anmpath, char *stdpath)
     i32 vmIdx;
     u32 sizeVmArr;
 
-    utils::DbgLog("[STG] LoadStageData anm=%s std=%s", anmpath, stdpath);
     if (g_AnmManager->LoadAnm(ANM_FILE_STAGEBG, anmpath, ANM_OFFSET_STAGEBG) != ZUN_SUCCESS)
     {
-        utils::DbgLog("[STG] LoadStageData anm FAILED");
         return ZUN_ERROR;
     }
     this->stdData = (RawStageHeader *)FileSystem::OpenPath(stdpath, false);
     if (this->stdData == NULL)
     {
-        utils::DbgLog("[STG] LoadStageData std FAILED");
         g_GameErrorContext.Log(TH_ERR_STAGE_DATA_CORRUPTED);
         return ZUN_ERROR;
     }
-    utils::DbgLog("[STG] LoadStageData OK objects=%d quads=%d", this->stdData->nbObjects, this->stdData->nbFaces);
     this->objectsCount = this->stdData->nbObjects;
     this->quadCount = this->stdData->nbFaces;
     this->objectInstances = (RawStageObjectInstance *)(this->stdData->facesOffset + (i32)this->stdData);
@@ -685,7 +679,6 @@ ZunResult Stage::RenderObjects(i32 zLevel)
         }
         instance++;
     }
-    utils::DbgLog("[STG] RenderObjects zLevel=%d drawn=%d", zLevel, instancesDrawn);
     return ZUN_SUCCESS;
 }
 }; // namespace th06

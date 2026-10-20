@@ -1,7 +1,11 @@
 #include "vulkan_renderer.hpp"
 #include "shaders_embedded.hpp"
 #include "shaders_embedded_frag.hpp"
+#include "shaders_embedded_fullscreen.hpp"
+#include "shaders_embedded_vertical.hpp"
 #include <SDL2/SDL_vulkan.h>
+
+#include "../GameErrorContext.hpp"
 #define STB_IMAGE_IMPLEMENTATION
 #include "../../3rdparty/stb_image.h"
 
@@ -13,18 +17,9 @@
 #include <stdexcept>
 #include <optional>
 
-// forward decl from utils
-namespace th06 { namespace utils { void DbgLog(const char* fmt, ...); } }
-
 namespace th06 {
 
 IRenderer* g_Renderer = nullptr;
-
-// Debug draw tracing: armed when the first 3D stage quad is drawn so that the
-// log captures the in-game frames rather than the menus.
-static bool g_drawLogArmed = false;
-static long g_drawLogBudget = 0;
-static long g_q2dLogBudget = 0;
 
 // ── Global Vulkan Function Pointers ──────────────────────────
 #define VK_FUNC(name) static PFN_##name p##name = nullptr;
@@ -72,6 +67,7 @@ VK_FUNC(vkCmdBindIndexBuffer)
 VK_FUNC(vkCmdSetViewport)
 VK_FUNC(vkCmdSetScissor)
 VK_FUNC(vkCmdDrawIndexed)
+VK_FUNC(vkCmdDraw)
 VK_FUNC(vkCmdPushConstants)
 VK_FUNC(vkCmdCopyBufferToImage)
 VK_FUNC(vkCmdCopyImageToBuffer)
@@ -156,6 +152,7 @@ VK_FUNC(vkDeviceWaitIdle)
 #define vkCmdSetViewport pvkCmdSetViewport
 #define vkCmdSetScissor pvkCmdSetScissor
 #define vkCmdDrawIndexed pvkCmdDrawIndexed
+#define vkCmdDraw pvkCmdDraw
 #define vkCmdPushConstants pvkCmdPushConstants
 #define vkCmdCopyBufferToImage pvkCmdCopyBufferToImage
 #define vkCmdCopyImageToBuffer pvkCmdCopyImageToBuffer
@@ -461,6 +458,12 @@ bool VulkanRenderer::InitVulkan() {
         return false;
     }
 
+    // Fence guarding one-time texture uploads.
+    VkFenceCreateInfo fci{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    if (vkCreateFence(device_, &fci, nullptr, &uploadFence_) != VK_SUCCESS) {
+        return false;
+    }
+
     return true;
 }
 
@@ -638,7 +641,19 @@ bool VulkanRenderer::CreateRenderPass() {
     rpci.dependencyCount = 1;
     rpci.pDependencies = &dependency;
 
-    return vkCreateRenderPass(device_, &rpci, nullptr, &renderPass_) == VK_SUCCESS;
+    if (vkCreateRenderPass(device_, &rpci, nullptr, &renderPass_) != VK_SUCCESS) return false;
+
+    // Clear(false) inside a scene restarts the pass but must keep the depth
+    // contents written so far. Same subpass structure (pipeline compatible),
+    // but the depth attachment LOADs instead of clearing.
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    attachments = { colorAttachment, depthAttachment };
+    rpci.pAttachments = attachments.data();
+    if (vkCreateRenderPass(device_, &rpci, nullptr, &renderPassResume_) != VK_SUCCESS) return false;
+
+    return true;
 }
 
 bool VulkanRenderer::CreateFramebuffers() {
@@ -656,6 +671,299 @@ bool VulkanRenderer::CreateFramebuffers() {
             return false;
         }
     }
+    return true;
+}
+
+static VkShaderModule CreateShaderModuleFromSpv(VkDevice device, const uint32_t* code, size_t size);
+
+bool VulkanRenderer::EnsureVerticalObjects(int width, int height) {
+    // Vertical (portrait) composition ── mirrors the fork's D3D8 CPU blit in
+    // GameWindow::Present. The scene renders into an offscreen 640x648 surface
+    // (GameWindow::verticalSurface) and this pass rotates it onto the swapchain
+    // via shaders/vertical.frag.
+    verticalWidth_ = width;
+    verticalHeight_ = height;
+    {
+
+        // Offscreen colour image (same format as the swapchain so the scene
+        // pipeline stays compatible).
+        VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        ici.imageType = VK_IMAGE_TYPE_2D;
+        ici.extent.width = (uint32_t)width;
+        ici.extent.height = (uint32_t)height;
+        ici.extent.depth = 1;
+        ici.mipLevels = 1;
+        ici.arrayLayers = 1;
+        ici.format = swapchainFormat_;
+        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateImage(device_, &ici, nullptr, &verticalColorImage_) != VK_SUCCESS) {
+            g_GameErrorContext.Fatal("[Vulkan] vertical composition image creation failed");
+            return false;
+        }
+        verticalWidth_ = width;
+        verticalHeight_ = height;
+
+        VkMemoryRequirements vcmReq;
+        vkGetImageMemoryRequirements(device_, verticalColorImage_, &vcmReq);
+        VkMemoryAllocateInfo vcm{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        vcm.allocationSize = vcmReq.size;
+        vcm.memoryTypeIndex = FindMemoryType(vcmReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (vkAllocateMemory(device_, &vcm, nullptr, &verticalColorMemory_) != VK_SUCCESS) {
+            g_GameErrorContext.Fatal("[Vulkan] vertical composition memory allocation failed");
+            return false;
+        }
+        vkBindImageMemory(device_, verticalColorImage_, verticalColorMemory_, 0);
+
+        VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vci.image = verticalColorImage_;
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format = swapchainFormat_;
+        vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        vci.subresourceRange.baseMipLevel = 0;
+        vci.subresourceRange.levelCount = 1;
+        vci.subresourceRange.baseArrayLayer = 0;
+        vci.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(device_, &vci, nullptr, &verticalColorView_) != VK_SUCCESS) {
+            g_GameErrorContext.Fatal("[Vulkan] vertical composition view creation failed");
+            return false;
+        }
+
+        // Depth attachment of the offscreen target.
+        VkImageCreateInfo di{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        di.imageType = VK_IMAGE_TYPE_2D;
+        di.extent.width = (uint32_t)width;
+        di.extent.height = (uint32_t)height;
+        di.extent.depth = 1;
+        di.mipLevels = 1;
+        di.arrayLayers = 1;
+        di.format = depthFormat_;
+        di.tiling = VK_IMAGE_TILING_OPTIMAL;
+        di.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        di.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        di.samples = VK_SAMPLE_COUNT_1_BIT;
+        di.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateImage(device_, &di, nullptr, &verticalDepthImage_) != VK_SUCCESS) {
+            g_GameErrorContext.Fatal("[Vulkan] vertical composition depth image creation failed");
+            return false;
+        }
+        VkMemoryRequirements vdmReq;
+        vkGetImageMemoryRequirements(device_, verticalDepthImage_, &vdmReq);
+        VkMemoryAllocateInfo vdm{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        vdm.allocationSize = vdmReq.size;
+        vdm.memoryTypeIndex = FindMemoryType(vdmReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (vkAllocateMemory(device_, &vdm, nullptr, &verticalDepthMemory_) != VK_SUCCESS) {
+            g_GameErrorContext.Fatal("[Vulkan] vertical composition depth memory allocation failed");
+            return false;
+        }
+        vkBindImageMemory(device_, verticalDepthImage_, verticalDepthMemory_, 0);
+
+        VkImageViewCreateInfo dvi{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        dvi.image = verticalDepthImage_;
+        dvi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        dvi.format = depthFormat_;
+        dvi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        dvi.subresourceRange.baseMipLevel = 0;
+        dvi.subresourceRange.levelCount = 1;
+        dvi.subresourceRange.baseArrayLayer = 0;
+        dvi.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(device_, &dvi, nullptr, &verticalDepthView_) != VK_SUCCESS) {
+            g_GameErrorContext.Fatal("[Vulkan] vertical composition depth view creation failed");
+            return false;
+        }
+
+        // Renderpass: colour ends up shader-readable for the composition's
+        // sampler; the depth clears each frame.
+        VkAttachmentDescription vcAtt{};
+        vcAtt.format = swapchainFormat_;
+        vcAtt.samples = VK_SAMPLE_COUNT_1_BIT;
+        vcAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        vcAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        vcAtt.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        vcAtt.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        vcAtt.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        vcAtt.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkAttachmentDescription vdAtt{};
+        vdAtt.format = depthFormat_;
+        vdAtt.samples = VK_SAMPLE_COUNT_1_BIT;
+        vdAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        vdAtt.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        vdAtt.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        vdAtt.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        vdAtt.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        vdAtt.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference vcRef{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkAttachmentReference vdRef{ 1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription vSub{};
+        vSub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        vSub.colorAttachmentCount = 1;
+        vSub.pColorAttachments = &vcRef;
+        vSub.pDepthStencilAttachment = &vdRef;
+
+        VkSubpassDependency vDep{};
+        vDep.srcSubpass = VK_SUBPASS_EXTERNAL;
+        vDep.dstSubpass = 0;
+        vDep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        vDep.srcAccessMask = 0;
+        vDep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                          | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        vDep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+        std::array<VkAttachmentDescription, 2> vAtts = { vcAtt, vdAtt };
+        VkRenderPassCreateInfo vRpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        vRpci.attachmentCount = static_cast<uint32_t>(vAtts.size());
+        vRpci.pAttachments = vAtts.data();
+        vRpci.subpassCount = 1;
+        vRpci.pSubpasses = &vSub;
+        vRpci.dependencyCount = 1;
+        vRpci.pDependencies = &vDep;
+        if (vkCreateRenderPass(device_, &vRpci, nullptr, &renderPassVertical_) != VK_SUCCESS) {
+            g_GameErrorContext.Fatal("[Vulkan] vertical render pass creation failed");
+            return false;
+        }
+
+        // Resume variant for the mid-scene Clear(false) restart: the colour is
+        // still cleared, the depth keeps its content. The colour image starts
+        // in SHADER_READ because the previous pass left it there.
+        vcAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        vcAtt.initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        vcAtt.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        vdAtt.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        vdAtt.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        vdAtt.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        vAtts = { vcAtt, vdAtt };
+        vRpci.pAttachments = vAtts.data();
+        if (vkCreateRenderPass(device_, &vRpci, nullptr, &renderPassVerticalResume_) != VK_SUCCESS) {
+            g_GameErrorContext.Fatal("[Vulkan] vertical resume render pass creation failed");
+            return false;
+        }
+
+        std::array<VkImageView, 2> vFbAtt = { verticalColorView_, verticalDepthView_ };
+        VkFramebufferCreateInfo vFb{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        vFb.renderPass = renderPassVertical_;
+        vFb.attachmentCount = static_cast<uint32_t>(vFbAtt.size());
+        vFb.pAttachments = vFbAtt.data();
+        vFb.width = (uint32_t)width;
+        vFb.height = (uint32_t)height;
+        vFb.layers = 1;
+        if (vkCreateFramebuffer(device_, &vFb, nullptr, &verticalFramebuffer_) != VK_SUCCESS) {
+            g_GameErrorContext.Fatal("[Vulkan] vertical framebuffer creation failed");
+            return false;
+        }
+
+        verticalCompositionBuilt_ = true;
+    }
+
+    // Composition descriptor set + pipeline.
+    {
+        VkDescriptorSetAllocateInfo vDsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        vDsai.descriptorPool = descPool_;
+        vDsai.descriptorSetCount = 1;
+        vDsai.pSetLayouts = &descSetLayout_;
+        if (vkAllocateDescriptorSets(device_, &vDsai, &verticalDescSet_) != VK_SUCCESS) {
+            g_GameErrorContext.Fatal("[Vulkan] vertical descriptor set allocation failed");
+            return false;
+        }
+        VkDescriptorImageInfo vDii{};
+        vDii.sampler = samplerVerticalNearest_;
+        vDii.imageView = verticalColorView_;
+        vDii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet vWds{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        vWds.dstSet = verticalDescSet_;
+        vWds.dstBinding = 0;
+        vWds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        vWds.descriptorCount = 1;
+        vWds.pImageInfo = &vDii;
+        vkUpdateDescriptorSets(device_, 1, &vWds, 0, nullptr);
+
+        struct PushConstantsCompose {
+            float rotRect[4];
+            float flags[4];
+            float dest[4];
+        };
+
+        VkShaderModule fullscreenVertMod = CreateShaderModuleFromSpv(device_, kFullscreenVertSpv, kFullscreenVertSpvSize);
+        VkShaderModule verticalFragMod = CreateShaderModuleFromSpv(device_, kVerticalFragSpv, kVerticalFragSpvSize);
+
+        VkPipelineShaderStageCreateInfo composeStages[2]{};
+        composeStages[0] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, fullscreenVertMod, "main" };
+        composeStages[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, verticalFragMod, "main" };
+
+        VkPipelineVertexInputStateCreateInfo composeVi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+
+        VkPipelineInputAssemblyStateCreateInfo composeIa{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        composeIa.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+        VkPipelineViewportStateCreateInfo composeVp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        composeVp.viewportCount = 1;
+        composeVp.scissorCount = 1;
+
+        VkPipelineRasterizationStateCreateInfo composeRs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        composeRs.polygonMode = VK_POLYGON_MODE_FILL;
+        composeRs.cullMode = VK_CULL_MODE_NONE;
+        composeRs.lineWidth = 1.0f;
+
+        VkPipelineMultisampleStateCreateInfo composeMs{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        composeMs.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        VkPipelineDepthStencilStateCreateInfo composeDs{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+        composeDs.depthTestEnable = VK_FALSE;
+        composeDs.depthWriteEnable = VK_FALSE;
+
+        VkPipelineColorBlendAttachmentState composeCb{};
+        composeCb.blendEnable = VK_FALSE;
+        composeCb.colorWriteMask = 0xF;
+        VkPipelineColorBlendStateCreateInfo composeCbs{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        composeCbs.attachmentCount = 1;
+        composeCbs.pAttachments = &composeCb;
+
+        VkDynamicState composeDynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo composeDyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        composeDyn.dynamicStateCount = 2;
+        composeDyn.pDynamicStates = composeDynStates;
+
+        VkPushConstantRange composePc{};
+        composePc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        composePc.offset = 0;
+        composePc.size = sizeof(PushConstantsCompose);
+        VkPipelineLayoutCreateInfo composePl{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        composePl.setLayoutCount = 1;
+        composePl.pSetLayouts = &descSetLayout_;
+        composePl.pushConstantRangeCount = 1;
+        composePl.pPushConstantRanges = &composePc;
+        if (vkCreatePipelineLayout(device_, &composePl, nullptr, &composePipelineLayout_) != VK_SUCCESS) {
+            g_GameErrorContext.Fatal("[Vulkan] vertical pipeline layout creation failed");
+            return false;
+        }
+
+        VkGraphicsPipelineCreateInfo composeGp{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        composeGp.stageCount = 2;
+        composeGp.pStages = composeStages;
+        composeGp.pVertexInputState = &composeVi;
+        composeGp.pInputAssemblyState = &composeIa;
+        composeGp.pViewportState = &composeVp;
+        composeGp.pRasterizationState = &composeRs;
+        composeGp.pMultisampleState = &composeMs;
+        composeGp.pDepthStencilState = &composeDs;
+        composeGp.pColorBlendState = &composeCbs;
+        composeGp.pDynamicState = &composeDyn;
+        composeGp.layout = composePipelineLayout_;
+        composeGp.renderPass = renderPass_;
+        composeGp.subpass = 0;
+        if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &composeGp, nullptr, &composePipeline_) != VK_SUCCESS) {
+            g_GameErrorContext.Fatal("[Vulkan] vertical pipeline creation failed");
+            return false;
+        }
+
+        vkDestroyShaderModule(device_, fullscreenVertMod, nullptr);
+        vkDestroyShaderModule(device_, verticalFragMod, nullptr);
+    }
+
     return true;
 }
 
@@ -710,7 +1018,15 @@ bool VulkanRenderer::CreateDescriptorPool() {
     samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    return vkCreateSampler(device_, &samplerInfo, nullptr, &samplerClamp_) == VK_SUCCESS;
+    if (vkCreateSampler(device_, &samplerInfo, nullptr, &samplerClamp_) != VK_SUCCESS) {
+        return false;
+    }
+
+    // NEAREST variant for the vertical composition pass (pixel-exact blit).
+    samplerInfo.minFilter = VK_FILTER_NEAREST;
+    samplerInfo.magFilter = VK_FILTER_NEAREST;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    return vkCreateSampler(device_, &samplerInfo, nullptr, &samplerVerticalNearest_) == VK_SUCCESS;
 }
 
 static VkShaderModule CreateShaderModuleFromSpv(VkDevice device, const uint32_t* code, size_t size) {
@@ -861,12 +1177,6 @@ bool VulkanRenderer::CreatePipelines() {
     ds3D.depthTestEnable = VK_TRUE;
     ds3D.depthWriteEnable = VK_TRUE;
     ds3D.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-    if (getenv("VKDBG_NO_DEPTH") != nullptr)
-    {
-        utils::DbgLog("[VkD] stage pipeline depth test DISABLED (VKDBG_NO_DEPTH)");
-        ds3D.depthTestEnable = VK_FALSE;
-        ds3D.depthWriteEnable = VK_FALSE;
-    }
 
     VkPushConstantRange pc3D{};
     pc3D.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -898,6 +1208,8 @@ bool VulkanRenderer::CreatePipelines() {
     vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp3D, nullptr, &stagePipelineAlpha_);
     gp3D.pColorBlendState = &cbsAdd;
     vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp3D, nullptr, &stagePipelineAdd_);
+    gp3D.pColorBlendState = &cbsSub;
+    vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp3D, nullptr, &stagePipelineSub_);
 
     // Same pipelines with depth writes disabled (AnmVm zWriteDisable).
     ds3D.depthWriteEnable = VK_FALSE;
@@ -996,12 +1308,21 @@ void VulkanRenderer::Shutdown() {
 
         vkDestroyPipeline(device_, stagePipelineAlpha_, nullptr);
         vkDestroyPipeline(device_, stagePipelineAdd_, nullptr);
+        vkDestroyPipeline(device_, stagePipelineSub_, nullptr);
         vkDestroyPipeline(device_, stagePipelineAlphaNoZ_, nullptr);
         vkDestroyPipeline(device_, stagePipelineAddNoZ_, nullptr);
         vkDestroyPipelineLayout(device_, stagePipelineLayout_, nullptr);
 
+        ReleaseVerticalComposition();
+        ReleaseStaging();
+        if (uploadFence_ != VK_NULL_HANDLE) {
+            vkDestroyFence(device_, uploadFence_, nullptr);
+            uploadFence_ = VK_NULL_HANDLE;
+        }
+
         vkDestroySampler(device_, sampler_, nullptr);
         vkDestroySampler(device_, samplerClamp_, nullptr);
+        vkDestroySampler(device_, samplerVerticalNearest_, nullptr);
         vkDestroyDescriptorPool(device_, descPool_, nullptr);
         vkDestroyDescriptorSetLayout(device_, descSetLayout_, nullptr);
 
@@ -1013,6 +1334,7 @@ void VulkanRenderer::Shutdown() {
         vkFreeMemory(device_, depthMemory_, nullptr);
 
         vkDestroyRenderPass(device_, renderPass_, nullptr);
+        vkDestroyRenderPass(device_, renderPassResume_, nullptr);
 
         for (auto iv : swapchainImageViews_) vkDestroyImageView(device_, iv, nullptr);
         swapchainImageViews_.clear();
@@ -1081,70 +1403,10 @@ bool VulkanRenderer::RecreateSwapchain() {
     return true;
 }
 
-// Converts a rectangle given in 640x480 game space into a device-pixel scissor.
-static VkRect2D MakeScissor(float destX, float destY, float sx, float sy, int x, int y, int w, int h,
-                            const VkExtent2D& extent) {
-    int x0 = static_cast<int>(std::floor(destX + x * sx));
-    int y0 = static_cast<int>(std::floor(destY + y * sy));
-    int x1 = static_cast<int>(std::ceil(destX + (x + w) * sx));
-    int y1 = static_cast<int>(std::ceil(destY + (y + h) * sy));
-    x0 = std::max(0, x0);
-    y0 = std::max(0, y0);
-    x1 = std::min(static_cast<int>(extent.width), x1);
-    y1 = std::min(static_cast<int>(extent.height), y1);
-    if (x1 < x0) x1 = x0;
-    if (y1 < y0) y1 = y0;
-    VkRect2D r;
-    r.offset = { x0, y0 };
-    r.extent = { static_cast<uint32_t>(x1 - x0), static_cast<uint32_t>(y1 - y0) };
-    return r;
-}
 
 static constexpr uint32_t VERTEX_BUFFER_BYTES = MAX_VERTICES_PER_FRAME * sizeof(Vertex3D);
 
-bool VulkanRenderer::ResolveTexture(TextureHandle& tex) {
-    if (tex >= textures_.size() || !textures_[tex].inUse) {
-        tex = whiteTexture_;
-    }
-    if (tex >= textures_.size()) return false;
 
-    // Textures created empty (CreateTexture) are not on the GPU until first used.
-    if (!textures_[tex].valid || textures_[tex].dirty) {
-        UploadTextureGPU(tex);
-    }
-    return textures_[tex].valid;
-}
-
-bool VulkanRenderer::BeginBatch2D(TextureHandle tex, BlendMode blend, uint32_t vertexCount, uint32_t indexCount) {
-    if (vertexCount_ + vertexCount > MAX_VERTICES_PER_FRAME ||
-        indexCount_ + indexCount > MAX_INDICES_PER_FRAME) {
-        return false;
-    }
-
-    bool needNew = batches2D_.empty();
-    if (!needNew) {
-        const Batch2D& b = batches2D_.back();
-        needNew = b.texture != tex || b.blendMode != blend || b.colorOpAdd != colorOpAdd_ ||
-                  b.vpX != gameViewportX_ || b.vpY != gameViewportY_ || b.vpW != gameViewportW_ ||
-                  b.vpH != gameViewportH_ || b.vertexCount + vertexCount > 65535;
-    }
-    if (needNew) {
-        Batch2D nb;
-        nb.texture = tex;
-        nb.blendMode = blend;
-        nb.colorOpAdd = colorOpAdd_;
-        nb.vpX = gameViewportX_;
-        nb.vpY = gameViewportY_;
-        nb.vpW = gameViewportW_;
-        nb.vpH = gameViewportH_;
-        nb.vertexByteOffset = vertexCount_ * sizeof(Vertex2D);
-        nb.vertexCount = vertexCount;
-        nb.indexStart = indexCount_;
-        nb.indexCount = 0;
-        batches2D_.push_back(nb);
-    }
-    return true;
-}
 
 // ── Frame Lifecycle ──────────────────────────────────────────
 
@@ -1181,19 +1443,26 @@ void VulkanRenderer::BeginScene() {
     clearColor_[0] = clearColor_[1] = clearColor_[2] = 0.0f; clearColor_[3] = 1.0f;
 
     VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-    rpbi.renderPass = renderPass_;
-    rpbi.framebuffer = framebuffers_[currentImageIndex_];
-    rpbi.renderArea.offset = { 0, 0 };
-    rpbi.renderArea.extent = swapchainExtent_;
     rpbi.clearValueCount = static_cast<uint32_t>(clearValues.size());
     rpbi.pClearValues = clearValues.data();
+    if (verticalCompositionActive_ && verticalCompositionBuilt_) {
+        // Route the whole scene into the offscreen portrait surface; Present()
+        // composes it onto the swapchain.
+        rpbi.renderPass = renderPassVertical_;
+        rpbi.framebuffer = verticalFramebuffer_;
+        rpbi.renderArea.offset = { 0, 0 };
+        rpbi.renderArea.extent = { static_cast<uint32_t>(verticalWidth_), static_cast<uint32_t>(verticalHeight_) };
+    } else {
+        rpbi.renderPass = renderPass_;
+        rpbi.framebuffer = framebuffers_[currentImageIndex_];
+        rpbi.renderArea.offset = { 0, 0 };
+        rpbi.renderArea.extent = swapchainExtent_;
+    }
 
     vkCmdBeginRenderPass(frame.cmdBuffer, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    passActive_ = true;
 
-    VkViewport vp{ 0.0f, 0.0f, (float)swapchainExtent_.width, (float)swapchainExtent_.height, 0.0f, 1.0f };
-    VkRect2D scissor{ {0, 0}, swapchainExtent_ };
-    vkCmdSetViewport(frame.cmdBuffer, 0, 1, &vp);
-    vkCmdSetScissor(frame.cmdBuffer, 0, 1, &scissor);
+    ApplyDrawViewport(false, 0.0f, 1.0f);
 
     vertexCount_ = 0;
     indexCount_ = 0;
@@ -1208,7 +1477,10 @@ void VulkanRenderer::EndScene() {
     FlushBatch2D();
 
     auto& frame = frames_[currentFrame_];
-    vkCmdEndRenderPass(frame.cmdBuffer);
+    if (passActive_) {
+        vkCmdEndRenderPass(frame.cmdBuffer);
+        passActive_ = false;
+    }
     vkEndCommandBuffer(frame.cmdBuffer);
 
     inScene_ = false;
@@ -1223,6 +1495,69 @@ void VulkanRenderer::Present() {
         if (!frameReady_) return;
     }
     auto& frame = frames_[currentFrame_];
+
+    if (verticalCompositionActive_ && verticalCompositionBuilt_) {
+        // ── Vertical composition: rotate the offscreen portrait render onto
+        // the swapchain image, matching the fork's CPU blit in
+        // GameWindow::Present (see shaders/vertical.frag). ──
+        struct PushConstantsCompose {
+            float rotRect[4];
+            float flags[4];
+            float dest[4];
+        };
+
+        // destRect = the scaled fit of the rotated region inside the client.
+        float rotW = (verticalCompositionInGame_ ? (float)(632u) : 640.0f);
+        float rotH = (verticalCompositionInGame_ ? 384.0f : 480.0f);
+        float destW = (float)swapchainExtent_.width;
+        float destH = destW * rotH / rotW;
+        if (destH > (float)swapchainExtent_.height) {
+            destH = (float)swapchainExtent_.height;
+            destW = destH * rotW / rotH;
+        }
+        float destX = ((float)swapchainExtent_.width - destW) * 0.5f;
+        float destY = ((float)swapchainExtent_.height - destH) * 0.5f;
+
+        std::array<VkClearValue, 2> composeClear{};
+        composeClear[0].color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
+        composeClear[1].depthStencil = { 1.0f, 0 };
+
+        VkRenderPassBeginInfo cRp{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        cRp.renderPass = renderPass_;
+        cRp.framebuffer = framebuffers_[currentImageIndex_];
+        cRp.renderArea.offset = { 0, 0 };
+        cRp.renderArea.extent = swapchainExtent_;
+        cRp.clearValueCount = static_cast<uint32_t>(composeClear.size());
+        cRp.pClearValues = composeClear.data();
+        vkCmdBeginRenderPass(frame.cmdBuffer, &cRp, VK_SUBPASS_CONTENTS_INLINE);
+
+        // inScene_ is false by now, so set the full-swapchain viewport directly.
+        VkViewport cvp{ 0.0f, 0.0f, (float)swapchainExtent_.width, (float)swapchainExtent_.height, 0.0f, 1.0f };
+        VkRect2D csc{ { 0, 0 }, swapchainExtent_ };
+        vkCmdSetViewport(frame.cmdBuffer, 0, 1, &cvp);
+        vkCmdSetScissor(frame.cmdBuffer, 0, 1, &csc);
+
+        vkCmdBindPipeline(frame.cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, composePipeline_);
+        vkCmdBindDescriptorSets(frame.cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, composePipelineLayout_, 0, 1,
+                                &verticalDescSet_, 0, nullptr);
+
+        PushConstantsCompose pc{};
+        pc.rotRect[0] = rotW;
+        pc.rotRect[1] = rotH;
+        pc.flags[0] = verticalCompositionInGame_ ? 1.0f : 0.0f;
+        pc.flags[1] = verticalCompositionFlip180_ ? 1.0f : 0.0f;
+        pc.flags[2] = verticalCompositionTransitionBlack_ ? 1.0f : 0.0f;
+        pc.dest[0] = destX;
+        pc.dest[1] = destY;
+        pc.dest[2] = destW;
+        pc.dest[3] = destH;
+        vkCmdPushConstants(frame.cmdBuffer, composePipelineLayout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+        vkCmdDraw(frame.cmdBuffer, 3, 1, 0, 0);
+
+        vkCmdEndRenderPass(frame.cmdBuffer);
+        verticalCompositionTransitionBlack_ = false;
+    }
 
     VkSubmitInfo submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     VkSemaphore waitSemaphores[] = { frame.imageAvailable };
@@ -1255,12 +1590,48 @@ void VulkanRenderer::Present() {
     frameReady_ = false;
 }
 
-void VulkanRenderer::Clear(uint32_t argb, bool /*clearDepth*/) {
-    { static bool dbg=getenv("VKDBG_DRAWS")!=nullptr; if (dbg && g_drawLogArmed && g_drawLogBudget-- > 0) utils::DbgLog("[VkD] clear argb=%08x\n", argb); }
+void VulkanRenderer::Clear(uint32_t argb, bool clearDepth) {
     clearColor_[0] = ((argb >> 16) & 0xFF) / 255.0f;
     clearColor_[1] = ((argb >>  8) & 0xFF) / 255.0f;
     clearColor_[2] = ((argb >>  0) & 0xFF) / 255.0f;
     clearColor_[3] = ((argb >> 24) & 0xFF) / 255.0f;
+    clearDepth_ = clearDepth;
+
+    if (!inScene_ || !passActive_)
+    {
+        // Usual case: the colour is consumed by the next BeginScene. D3D8 keeps
+        // the clear colour until the next target clear, so store and return.
+        return;
+    }
+
+    // Mid-scene Clear: D3D8 clears the targets immediately. Restart the render
+    // pass around the clear so pending batches stay ordered after it.
+    auto& frame = frames_[currentFrame_];
+    FlushBatch2D();
+    vkCmdEndRenderPass(frame.cmdBuffer);
+    passActive_ = false;
+
+    std::array<VkClearValue, 2> clearValues{};
+    clearValues[0].color = { { clearColor_[0], clearColor_[1], clearColor_[2], clearColor_[3] } };
+    clearValues[1].depthStencil = { 1.0f, 0 };
+
+    VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    if (verticalCompositionActive_ && verticalCompositionBuilt_) {
+        rpbi.renderPass = clearDepth ? renderPassVertical_ : renderPassVerticalResume_;
+        rpbi.framebuffer = verticalFramebuffer_;
+        rpbi.renderArea.offset = { 0, 0 };
+        rpbi.renderArea.extent = { static_cast<uint32_t>(verticalWidth_), static_cast<uint32_t>(verticalHeight_) };
+    } else {
+        rpbi.renderPass = clearDepth ? renderPass_ : renderPassResume_;
+        rpbi.framebuffer = framebuffers_[currentImageIndex_];
+        rpbi.renderArea.offset = { 0, 0 };
+        rpbi.renderArea.extent = swapchainExtent_;
+    }
+    rpbi.clearValueCount = static_cast<uint32_t>(clearValues.size());
+    rpbi.pClearValues = clearValues.data();
+    vkCmdBeginRenderPass(frame.cmdBuffer, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    passActive_ = true;
+    ApplyDrawViewport(false, 0.0f, 1.0f);
 }
 
 void VulkanRenderer::SetViewport(int x, int y, int width, int height) {
@@ -1268,10 +1639,6 @@ void VulkanRenderer::SetViewport(int x, int y, int width, int height) {
 }
 
 void VulkanRenderer::SetGameViewport(int x, int y, int width, int height, float minZ, float maxZ) {
-    // The game viewport confines 3D stage rendering to the arcade region.
-    // It is stored (not applied immediately) because 2D quads are always drawn
-    // in absolute screen space with the full-screen viewport. The stored region
-    // is applied just before each 3D draw (see DrawQuad3D / ApplyGameViewport).
     gameViewportX_ = x;
     gameViewportY_ = y;
     gameViewportW_ = width;
@@ -1280,39 +1647,75 @@ void VulkanRenderer::SetGameViewport(int x, int y, int width, int height, float 
     gameViewportMaxZ_ = maxZ;
 }
 
-void VulkanRenderer::ApplyFullViewport() {
+// Maps a rectangle in 640x480 backbuffer coordinates onto the letter-boxed
+// game region of the swapchain and installs it as the dynamic viewport/scissor.
+// With useGameViewport the current game viewport (SetViewport forwarding) is
+// used instead, clipped to the backbuffer like D3D8 does.
+void VulkanRenderer::ApplyDrawViewport(bool useGameViewport, float minZ, float maxZ) {
     if (!inScene_) return;
-    VkViewport vp{ 0.0f, 0.0f, (float)swapchainExtent_.width, (float)swapchainExtent_.height, 0.0f, 1.0f };
-    VkRect2D scissor{ { 0, 0 }, swapchainExtent_ };
+
+    const bool verticalActive = verticalCompositionActive_ && verticalCompositionBuilt_;
+    const int baseW = verticalActive ? verticalWidth_ : 640;
+    const int baseH = verticalActive ? verticalHeight_ : 480;
+
+    int gx0 = 0, gy0 = 0, gx1 = baseW, gy1 = baseH;
+    if (useGameViewport) {
+        gx0 = std::max(0, gameViewportX_);
+        gy0 = std::max(0, gameViewportY_);
+        gx1 = std::min(baseW, gameViewportX_ + gameViewportW_);
+        gy1 = std::min(baseH, gameViewportY_ + gameViewportH_);
+        if (gx1 <= gx0 || gy1 <= gy0) {
+            gx0 = 0; gy0 = 0; gx1 = baseW; gy1 = baseH;
+        }
+    }
+
+    float sx, sy, offX, offY;
+    uint32_t fbW, fbH;
+    if (verticalActive) {
+        // Game coordinates map 1:1 onto the offscreen portrait surface.
+        sx = 1.0f;
+        sy = 1.0f;
+        offX = 0.0f;
+        offY = 0.0f;
+        fbW = static_cast<uint32_t>(verticalWidth_);
+        fbH = static_cast<uint32_t>(verticalHeight_);
+    } else {
+        sx = destW_ / 640.0f;
+        sy = destH_ / 480.0f;
+        offX = destX_;
+        offY = destY_;
+        fbW = swapchainExtent_.width;
+        fbH = swapchainExtent_.height;
+    }
+    float vx = offX + static_cast<float>(gx0) * sx;
+    float vy = offY + static_cast<float>(gy0) * sy;
+    float vw = static_cast<float>(gx1 - gx0) * sx;
+    float vh = static_cast<float>(gy1 - gy0) * sy;
+    float tz = useGameViewport ? minZ : 0.0f;
+    float bz = useGameViewport ? maxZ : 1.0f;
+
+    int32_t scx = static_cast<int32_t>(vx);
+    int32_t scy = static_cast<int32_t>(vy);
+    uint32_t scw = static_cast<uint32_t>(std::max(1.0f, vw));
+    uint32_t sch = static_cast<uint32_t>(std::max(1.0f, vh));
+    if (scx < 0) scx = 0;
+    if (scy < 0) scy = 0;
+    if (scx + scw > static_cast<int32_t>(fbW)) scw = fbW - scx;
+    if (scy + sch > static_cast<int32_t>(fbH)) sch = fbH - scy;
+
+    VkViewport vp{ vx, vy, std::max(1.0f, vw), std::max(1.0f, vh), tz, bz };
+    VkRect2D scissor{ { scx, scy }, { scw, sch } };
     vkCmdSetViewport(frames_[currentFrame_].cmdBuffer, 0, 1, &vp);
     vkCmdSetScissor(frames_[currentFrame_].cmdBuffer, 0, 1, &scissor);
 }
 
 void VulkanRenderer::ApplyGameViewport() {
-    if (!inScene_) return;
-
-    // Scale from 640x480 coordinate space to actual swapchain extent
-    float scaleX = (float)swapchainExtent_.width / 640.0f;
-    float scaleY = (float)swapchainExtent_.height / 480.0f;
-
-    float vx = (float)gameViewportX_ * scaleX;
-    float vy = (float)gameViewportY_ * scaleY;
-    float vw = (float)gameViewportW_ * scaleX;
-    float vh = (float)gameViewportH_ * scaleY;
-
-    VkViewport vp{ vx, vy, vw, vh, gameViewportMinZ_, gameViewportMaxZ_ };
-    VkRect2D scissor{
-        { (int32_t)vx, (int32_t)vy },
-        { (uint32_t)vw, (uint32_t)vh }
-    };
-    vkCmdSetViewport(frames_[currentFrame_].cmdBuffer, 0, 1, &vp);
-    vkCmdSetScissor(frames_[currentFrame_].cmdBuffer, 0, 1, &scissor);
+    ApplyDrawViewport(true, gameViewportMinZ_, gameViewportMaxZ_);
 }
 
 // ── 2D Drawing ───────────────────────────────────────────────
 
 void VulkanRenderer::DrawQuad2D(TextureHandle tex, const Vertex2D v[4], BlendMode blend) {
-    { float qw = v[3].x - v[0].x; float qh = v[3].y - v[0].y; if (g_drawLogArmed && qw >= 30.0f && qw <= 34.0f && qh >= 30.0f && qh <= 34.0f && g_q2dLogBudget-- > 0) utils::DbgLog("[VkD] q2d tex=%zu wh=%ux%u blend=%d p0=(%.0f,%.0f) p3=(%.0f,%.0f) uv0=(%.4f,%.4f) uv3=(%.4f,%.4f) col=%08x\n", (size_t)tex, tex<textures_.size()?textures_[tex].width:0, tex<textures_.size()?textures_[tex].height:0, (int)blend, v[0].x, v[0].y, v[3].x, v[3].y, v[0].u, v[0].v, v[3].u, v[3].v, v[0].color); }
     if (!inScene_) return;
     if (tex >= textures_.size() || !textures_[tex].valid) {
         tex = whiteTexture_;
@@ -1334,10 +1737,6 @@ void VulkanRenderer::DrawQuad2D(TextureHandle tex, const Vertex2D v[4], BlendMod
         nb.texture = tex;
         nb.blendMode = blend;
         nb.colorOpAdd = colorOpAdd_;
-        nb.vpX = gameViewportX_;
-        nb.vpY = gameViewportY_;
-        nb.vpW = gameViewportW_;
-        nb.vpH = gameViewportH_;
         nb.indexStart = indexCount_;
         nb.indexCount = 0;
         batches2D_.push_back(nb);
@@ -1350,10 +1749,6 @@ void VulkanRenderer::DrawQuad2D(TextureHandle tex, const Vertex2D v[4], BlendMod
         nb.texture = tex;
         nb.blendMode = blend;
         nb.colorOpAdd = colorOpAdd_;
-        nb.vpX = gameViewportX_;
-        nb.vpY = gameViewportY_;
-        nb.vpW = gameViewportW_;
-        nb.vpH = gameViewportH_;
         nb.indexStart = indexCount_;
         nb.indexCount = 0;
         batches2D_.push_back(nb);
@@ -1382,7 +1777,6 @@ void VulkanRenderer::DrawQuad2D(TextureHandle tex, const Vertex2D v[4], BlendMod
 }
 
 void VulkanRenderer::DrawColoredQuad2D(const Vertex2D v[4], BlendMode blend) {
-    { if (g_drawLogArmed && g_q2dLogBudget-- > 0) utils::DbgLog("[VkD] cq2d blend=%d p0=(%.0f,%.0f) p3=(%.0f,%.0f) col=%08x\n", (int)blend, v[0].x, v[0].y, v[3].x, v[3].y, v[0].color); }
     DrawQuad2D(whiteTexture_, v, blend);
 }
 
@@ -1406,10 +1800,6 @@ void VulkanRenderer::DrawTriangleStrip2D(TextureHandle tex, const Vertex2D* vert
         nb.texture = tex;
         nb.blendMode = blend;
         nb.colorOpAdd = colorOpAdd_;
-        nb.vpX = gameViewportX_;
-        nb.vpY = gameViewportY_;
-        nb.vpW = gameViewportW_;
-        nb.vpH = gameViewportH_;
         nb.indexStart = indexCount_;
         nb.indexCount = 0;
         batches2D_.push_back(nb);
@@ -1422,10 +1812,6 @@ void VulkanRenderer::DrawTriangleStrip2D(TextureHandle tex, const Vertex2D* vert
         nb.texture = tex;
         nb.blendMode = blend;
         nb.colorOpAdd = colorOpAdd_;
-        nb.vpX = gameViewportX_;
-        nb.vpY = gameViewportY_;
-        nb.vpW = gameViewportW_;
-        nb.vpH = gameViewportH_;
         nb.indexStart = indexCount_;
         nb.indexCount = 0;
         batches2D_.push_back(nb);
@@ -1475,10 +1861,6 @@ void VulkanRenderer::DrawTriangleFan2D(TextureHandle tex, const Vertex2D* verts,
         nb.texture = tex;
         nb.blendMode = blend;
         nb.colorOpAdd = colorOpAdd_;
-        nb.vpX = gameViewportX_;
-        nb.vpY = gameViewportY_;
-        nb.vpW = gameViewportW_;
-        nb.vpH = gameViewportH_;
         nb.indexStart = indexCount_;
         nb.indexCount = 0;
         batches2D_.push_back(nb);
@@ -1491,10 +1873,6 @@ void VulkanRenderer::DrawTriangleFan2D(TextureHandle tex, const Vertex2D* verts,
         nb.texture = tex;
         nb.blendMode = blend;
         nb.colorOpAdd = colorOpAdd_;
-        nb.vpX = gameViewportX_;
-        nb.vpY = gameViewportY_;
-        nb.vpW = gameViewportW_;
-        nb.vpH = gameViewportH_;
         nb.indexStart = indexCount_;
         nb.indexCount = 0;
         batches2D_.push_back(nb);
@@ -1521,9 +1899,10 @@ void VulkanRenderer::DrawTriangleFan2D(TextureHandle tex, const Vertex2D* verts,
 void VulkanRenderer::FlushBatch2D() {
     if (batches2D_.empty() || indexCount_ == 0) return;
 
-    // 2D quads use absolute screen coordinates, so always draw them with the
-    // full-screen viewport regardless of the current game viewport.
-    ApplyFullViewport();
+    // 2D quads are transformed in the 640x480 backbuffer space, so draw them
+    // into the letter-boxed game region (the current game viewport clipped to
+    // the backbuffer already being part of that region).
+    ApplyDrawViewport(false, 0.0f, 1.0f);
 
     auto& frame = frames_[currentFrame_];
     VkDeviceSize offset = 0;
@@ -1531,10 +1910,15 @@ void VulkanRenderer::FlushBatch2D() {
     vkCmdBindIndexBuffer(frame.cmdBuffer, frame.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
     PushConstants2D pcBase{};
-    // Orthographic projection: [0, 640] x [0, 480] -> [-1, 1] x [-1, 1]
+    // Orthographic projection: [0, W] x [0, H] -> [-1, 1] x [-1, 1]
     // Vulkan Y is downwards (0 at top, 1 at bottom in NDC if using standard viewport)
+    // In vertical (portrait) mode the drawing space is the offscreen surface
+    // (640x648), so the clip maps those heights.
+    const float projH = (verticalCompositionActive_ && verticalCompositionBuilt_)
+                            ? static_cast<float>(verticalHeight_)
+                            : 480.0f;
     pcBase.projMat[0]  =  2.0f / 640.0f;
-    pcBase.projMat[5]  =  2.0f / 480.0f;
+    pcBase.projMat[5]  =  2.0f / projH;
     pcBase.projMat[10] =  1.0f;
     pcBase.projMat[12] = -1.0f;
     pcBase.projMat[13] = -1.0f;
@@ -1550,6 +1934,16 @@ void VulkanRenderer::FlushBatch2D() {
 
         PushConstants2D pc = pcBase;
         pc.colorOpAdd = batch.colorOpAdd ? 1.0f : 0.0f;
+        // D3D8 texel-center origin correction (see sprite.frag). Quads whose
+        // UVs address texel boundaries (e.g. v = 0.5 for the music room list
+        // rows) must sample the texel centre instead of straddling two rows.
+        if (batch.texture < textures_.size() && textures_[batch.texture].valid) {
+            pc.halfTexelU = 0.5f / static_cast<float>(textures_[batch.texture].width);
+            pc.halfTexelV = 0.5f / static_cast<float>(textures_[batch.texture].height);
+        } else {
+            pc.halfTexelU = 0.0f;
+            pc.halfTexelV = 0.0f;
+        }
         vkCmdPushConstants(frame.cmdBuffer, spritePipelineLayout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(PushConstants2D), &pc);
@@ -1589,27 +1983,9 @@ void VulkanRenderer::SetCamera3D(const float view[16], const float proj[16]) {
             }
         }
     }
-
-    static bool dbgDraws = getenv("VKDBG_DRAWS") != nullptr;
-    static int mcnt = 0;
-    if (dbgDraws && mcnt++ < 2) {
-        utils::DbgLog("[VkD] proj=[%.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f]",
-            proj[0],proj[1],proj[2],proj[3],proj[4],proj[5],proj[6],proj[7],proj[8],proj[9],proj[10],proj[11],proj[12],proj[13],proj[14],proj[15]);
-        utils::DbgLog("[VkD] view=[%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f]",
-            view[0],view[1],view[2],view[3],view[4],view[5],view[6],view[7],view[8],view[9],view[10],view[11],view[12],view[13],view[14],view[15]);
-    }
 }
 
 void VulkanRenderer::SetFog(bool enable, uint32_t color, float nearZ, float farZ) {
-    static bool dbgOnce = []() {
-        utils::DbgLog("[FOG] SetFog enabled");
-        return true;
-    }();
-    static int cnt = 0;
-    if (cnt++ < 600)
-    {
-        utils::DbgLog("[FOG] enable=%d col=%08x near=%.1f far=%.1f", (int)enable, color, nearZ, farZ);
-    }
     fogEnable_ = enable;
     fogColor_ = color;
     fogNear_ = nearZ;
@@ -1617,16 +1993,6 @@ void VulkanRenderer::SetFog(bool enable, uint32_t color, float nearZ, float farZ
 }
 
 void VulkanRenderer::DrawQuad3D(const float world[16], TextureHandle tex, const Vertex3D v[4], BlendMode blend) {
-    static bool dbgDraws = getenv("VKDBG_DRAWS") != nullptr;
-    if (!g_drawLogArmed) { g_drawLogArmed = true; g_drawLogBudget = 4000; g_q2dLogBudget = 20000; }
-    if (dbgDraws && g_drawLogBudget-- > 0)
-    {
-        uint32_t c = v[0].color;
-        utils::DbgLog("[VkD] q3d tex=%zu valid=%d blend=%d col=(r%.0f,g%.0f,b%.0f,a%.0f) uv0=(%.3f,%.3f) uv3=(%.3f,%.3f)",
-                      (size_t)tex, tex < textures_.size() ? (int)textures_[tex].valid : -1, (int)blend,
-                      (float)((c >> 16) & 0xFF), (float)((c >> 8) & 0xFF), (float)(c & 0xFF),
-                      (float)((c >> 24) & 0xFF), v[0].u, v[0].v, v[3].u, v[3].v);
-    }
     if (!inScene_) return;
     FlushBatch2D();
 
@@ -1649,35 +2015,11 @@ void VulkanRenderer::DrawQuad3D(const float world[16], TextureHandle tex, const 
     uint16_t* iDst = static_cast<uint16_t*>(frame.mappedIndices) + indexCount_;
     uint16_t base = static_cast<uint16_t>(vertexCount_);
 
-    float x0, y0, z0;
     for (int i = 0; i < 4; i++) {
         float x = v[i].x * world[0] + v[i].y * world[4] + v[i].z * world[8]  + world[12];
         float y = v[i].x * world[1] + v[i].y * world[5] + v[i].z * world[9]  + world[13];
         float z = v[i].x * world[2] + v[i].y * world[6] + v[i].z * world[10] + world[14];
-        if (i == 0) { x0 = x; y0 = y; z0 = z; }
         vDst[i] = { x, y, z, v[i].u, v[i].v, v[i].color };
-    }
-
-    static bool foliageSolid = getenv("VKDBG_FOLIAGE_SOLID") != nullptr;
-    if (foliageSolid && z0 > -320.0f && z0 < -280.0f) {
-        float dx = 192.0f - x0;
-        for (int i = 0; i < 4; i++) { vDst[i].x += dx; vDst[i].color = 0xFFFF00FF; }
-        tex = whiteTexture_;
-        utils::DbgLog("[VkD] foliage SOLID recenter dx=%.1f v0ndc=(%.2f,%.2f)", dx,
-                      (vDst[0].x*viewProjMatrix_[0]+vDst[0].y*viewProjMatrix_[4]+vDst[0].z*viewProjMatrix_[8]+viewProjMatrix_[12]),
-                      (vDst[0].x*viewProjMatrix_[1]+vDst[0].y*viewProjMatrix_[5]+vDst[0].z*viewProjMatrix_[9]+viewProjMatrix_[13]));
-    }
-
-    if (dbgDraws && g_drawLogBudget-- > 0) {
-        const float* P = viewProjMatrix_;
-        float cw = x0*P[3] + y0*P[7] + z0*P[11] + P[15];
-        float cx = x0*P[0] + y0*P[4] + z0*P[8]  + P[12];
-        float cy = x0*P[1] + y0*P[5] + z0*P[9]  + P[13];
-        float cd = x0*P[2] + y0*P[6] + z0*P[10] + P[14];
-        utils::DbgLog("[VkD]   w-pos=(%.1f,%.1f,%.1f) ndc=(%.3f,%.3f) depth=%.3f vp=(%d,%d,%d,%d) zr=(%.2f,%.2f)",
-                      x0, y0, z0, cw ? cx/cw : -9.0f, cw ? cy/cw : -9.0f, cw ? cd/cw : -9.0f,
-                      gameViewportX_, gameViewportY_, gameViewportW_, gameViewportH_,
-                      gameViewportMinZ_, gameViewportMaxZ_);
     }
 
     iDst[0] = base + 0;
@@ -1700,17 +2042,18 @@ void VulkanRenderer::DrawQuad3D(const float world[16], TextureHandle tex, const 
     pc3D.fogDist[0] = fogNear_;
     pc3D.fogDist[1] = fogFar_;
     pc3D.fogEnable = fogEnable_ ? 1.0f : 0.0f;
-    static bool noFogDbg = getenv("VKDBG_NO_FOG") != nullptr;
-    if (noFogDbg)
-    {
-        pc3D.fogEnable = 0.0f;
-    }
+    pc3D.colorOpAdd = colorOpAdd_ ? 1.0f : 0.0f;
 
     vkCmdPushConstants(frame.cmdBuffer, stagePipelineLayout_,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants3D), &pc3D);
 
-    VkPipeline pipeline = (blend == BLEND_ADD) ? stagePipelineAdd_ : stagePipelineAlpha_;
+    // Pipeline selection mirrors D3D8: blend mode picks the colour-blend
+    // state, the current D3DRS_ZWRITEENABLE picks the depth-write variant.
+    VkPipeline pipeline;
+    if (blend == BLEND_SUB) pipeline = stagePipelineSub_;
+    else if (blend == BLEND_ADD) pipeline = depthWrite_ ? stagePipelineAdd_ : stagePipelineAddNoZ_;
+    else pipeline = depthWrite_ ? stagePipelineAlpha_ : stagePipelineAlphaNoZ_;
     vkCmdBindPipeline(frame.cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
     vkCmdBindDescriptorSets(frame.cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1737,12 +2080,20 @@ TextureHandle VulkanRenderer::CreateTexture(uint32_t width, uint32_t height, boo
     // Find free slot. Slot 0 is reserved for the white texture so that a
     // valid texture handle is never 0 (the game casts handles to pointers and
     // treats a null pointer as a failed texture creation).
+    //
+    // NOTE: only a slot never handed out (or explicitly released) may be
+    // reused. Testing "not uploaded" instead would steal slots from textures
+    // the engine created but has not uploaded yet (e.g. the '@' placeholder
+    // texture of text.anm), which aliasing-merges two game textures into one
+    // resource.
     for (size_t i = 1; i < textures_.size(); i++) {
-        if (!textures_[i].valid && textures_[i].image == VK_NULL_HANDLE) {
+        if (!textures_[i].inUse) {
+            res.inUse = true;
             textures_[i] = std::move(res);
             return i;
         }
     }
+    res.inUse = true;
     textures_.push_back(std::move(res));
     return textures_.size() - 1;
 }
@@ -1767,20 +2118,6 @@ TextureHandle VulkanRenderer::CreateTextureFromMemory(const void* data, size_t s
                 p[3] = 0; // Transparent
             }
         }
-    }
-
-    {
-        long long sr = 0, sg = 0, sb = 0, sa = 0;
-        for (int i = 0; i < w * h; i++) {
-            sr += pixels[i * 4 + 0]; sg += pixels[i * 4 + 1]; sb += pixels[i * 4 + 2]; sa += pixels[i * 4 + 3];
-        }
-        long long n = (long long)w * h;
-        utils::DbgLog("[VkT] decode %dx%d avg=(r%lld,g%lld,b%lld,a%lld) px(33,112)=(%d,%d,%d,%d)",
-                      w, h, sr / n, sg / n, sb / n, sa / n,
-                      w > 33 && h > 112 ? pixels[(112 * w + 33) * 4 + 0] : -1,
-                      w > 33 && h > 112 ? pixels[(112 * w + 33) * 4 + 1] : -1,
-                      w > 33 && h > 112 ? pixels[(112 * w + 33) * 4 + 2] : -1,
-                      w > 33 && h > 112 ? pixels[(112 * w + 33) * 4 + 3] : -1);
     }
 
     TextureHandle handle = CreateTexture(w, h, clampToEdge);
@@ -1817,19 +2154,22 @@ void VulkanRenderer::UnlockTexture(TextureHandle handle) {
 }
 
 void VulkanRenderer::ReleaseTexture(TextureHandle handle) {
-    if (handle < textures_.size() && textures_[handle].valid) {
+    if (handle < textures_.size() && textures_[handle].inUse) {
         vkDeviceWaitIdle(device_);
         if (textures_[handle].descriptorSet != VK_NULL_HANDLE) {
             VkDescriptorSet sets[2] = { textures_[handle].descriptorSet, textures_[handle].descriptorSet2D };
             vkFreeDescriptorSets(device_, descPool_, 2, sets);
-            textures_[handle].descriptorSet = VK_NULL_HANDLE;
-            textures_[handle].descriptorSet2D = VK_NULL_HANDLE;
         }
-        vkDestroyImageView(device_, textures_[handle].view, nullptr);
-        vkDestroyImage(device_, textures_[handle].image, nullptr);
-        vkFreeMemory(device_, textures_[handle].memory, nullptr);
-        textures_[handle].image = VK_NULL_HANDLE;
-        textures_[handle].valid = false;
+        if (textures_[handle].view != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_, textures_[handle].view, nullptr);
+        }
+        if (textures_[handle].image != VK_NULL_HANDLE) {
+            vkDestroyImage(device_, textures_[handle].image, nullptr);
+            vkFreeMemory(device_, textures_[handle].memory, nullptr);
+        }
+        // Reset the whole record so the slot can be handed out again without
+        // carrying stale descriptors/cpu data from the previous occupant.
+        textures_[handle] = TextureResource{};
     }
 }
 
@@ -1906,29 +2246,10 @@ void VulkanRenderer::UploadTextureGPU(TextureHandle handle) {
         tex.valid = true;
     }
 
-    // Staging upload
+    // Staging upload through the persistent host-visible staging buffer
     VkDeviceSize imageSize = tex.width * tex.height * 4;
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingMemory;
-
-    VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-    bci.size = imageSize;
-    bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    vkCreateBuffer(device_, &bci, nullptr, &stagingBuffer);
-
-    VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(device_, stagingBuffer, &req);
-    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-    mai.allocationSize = req.size;
-    mai.memoryTypeIndex = FindMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    vkAllocateMemory(device_, &mai, nullptr, &stagingMemory);
-    vkBindBufferMemory(device_, stagingBuffer, stagingMemory, 0);
-
-    void* data;
-    vkMapMemory(device_, stagingMemory, 0, imageSize, 0, &data);
-    memcpy(data, tex.cpuData.data(), imageSize);
-    vkUnmapMemory(device_, stagingMemory);
+    if (!EnsureStaging(imageSize)) return;
+    memcpy(stagingMapped_, tex.cpuData.data(), imageSize);
 
     // Command buffer for transfer
     VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
@@ -1962,7 +2283,7 @@ void VulkanRenderer::UploadTextureGPU(TextureHandle handle) {
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     region.imageSubresource.layerCount = 1;
     region.imageExtent = { tex.width, tex.height, 1 };
-    vkCmdCopyBufferToImage(cmd, stagingBuffer, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    vkCmdCopyBufferToImage(cmd, stagingBuffer_, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
     // Transition Transfer Dst -> Shader Read Only
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -1976,14 +2297,69 @@ void VulkanRenderer::UploadTextureGPU(TextureHandle handle) {
     VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
-    vkQueueSubmit(graphicsQueue_, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(graphicsQueue_);
+    vkQueueSubmit(graphicsQueue_, 1, &si, uploadFence_);
+    if (vkWaitForFences(device_, 1, &uploadFence_, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+        tex.dirty = false;
+        vkFreeCommandBuffers(device_, cmdPool_, 1, &cmd);
+        return;
+    }
+    vkResetFences(device_, 1, &uploadFence_);
 
     vkFreeCommandBuffers(device_, cmdPool_, 1, &cmd);
-    vkDestroyBuffer(device_, stagingBuffer, nullptr);
-    vkFreeMemory(device_, stagingMemory, nullptr);
 
     tex.dirty = false;
+}
+
+bool VulkanRenderer::EnsureStaging(VkDeviceSize bytes) {
+    if (stagingBuffer_ != VK_NULL_HANDLE && stagingCapacity_ >= bytes) return true;
+    ReleaseStaging();
+
+    // Grow in 1 MiB steps; textures are small, readbacks use this too.
+    VkDeviceSize want = std::max<VkDeviceSize>(bytes, 1u << 20);
+    VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bci.size = want;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device_, &bci, nullptr, &stagingBuffer_) != VK_SUCCESS) return false;
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(device_, stagingBuffer_, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize = req.size;
+    mai.memoryTypeIndex = FindMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(device_, &mai, nullptr, &stagingMemory_) != VK_SUCCESS) {
+        vkDestroyBuffer(device_, stagingBuffer_, nullptr);
+        stagingBuffer_ = VK_NULL_HANDLE;
+        return false;
+    }
+    if (vkBindBufferMemory(device_, stagingBuffer_, stagingMemory_, 0) != VK_SUCCESS) {
+        vkFreeMemory(device_, stagingMemory_, nullptr);
+        vkDestroyBuffer(device_, stagingBuffer_, nullptr);
+        stagingMemory_ = VK_NULL_HANDLE;
+        stagingBuffer_ = VK_NULL_HANDLE;
+        return false;
+    }
+    if (vkMapMemory(device_, stagingMemory_, 0, want, 0, &stagingMapped_) != VK_SUCCESS) {
+        vkFreeMemory(device_, stagingMemory_, nullptr);
+        vkDestroyBuffer(device_, stagingBuffer_, nullptr);
+        stagingMemory_ = VK_NULL_HANDLE;
+        stagingBuffer_ = VK_NULL_HANDLE;
+        return false;
+    }
+    stagingCapacity_ = want;
+    return true;
+}
+
+void VulkanRenderer::ReleaseStaging() {
+    if (stagingBuffer_ != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device_, stagingBuffer_, nullptr);
+        stagingBuffer_ = VK_NULL_HANDLE;
+    }
+    if (stagingMemory_ != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, stagingMemory_, nullptr);
+        stagingMemory_ = VK_NULL_HANDLE;
+    }
+    stagingMapped_ = nullptr;
+    stagingCapacity_ = 0;
 }
 
 void VulkanRenderer::CaptureScreen(TextureHandle target, int left, int top, int width, int height) {
@@ -1995,12 +2371,10 @@ void VulkanRenderer::CaptureScreen(TextureHandle target, int left, int top, int 
     auto& dst = textures_[target];
     if (dst.width == 0 || dst.height == 0) return;
 
-    // D3DXLoadSurfaceFromSurface scales the source rect to FILL the destination
-    // texture (the original game uses this for its pause bg), so capture the
-    // full requested rect and let BlitPixelsToTexture downscale it.
-
     // The 640x480 game image is letter-boxed into the swapchain; map the
-    // source rect into swapchain pixels.
+    // source rect (given in game space) into swapchain pixels. The rendered
+    // image occupies exactly that region, so what is read back is the same
+    // content a D3D8 backbuffer would hold.
     int ix0 = static_cast<int>(std::lround(destX_ + static_cast<float>(left) / 640.0f * destW_));
     int iy0 = static_cast<int>(std::lround(destY_ + static_cast<float>(top) / 480.0f * destH_));
     int iw = static_cast<int>(std::lround(static_cast<float>(width) / 640.0f * destW_));
@@ -2011,41 +2385,162 @@ void VulkanRenderer::CaptureScreen(TextureHandle target, int left, int top, int 
     if (iy0 + ih > static_cast<int>(swapchainExtent_.height)) ih = static_cast<int>(swapchainExtent_.height) - iy0;
     if (iw <= 0 || ih <= 0) return;
 
-    vkQueueWaitIdle(graphicsQueue_);
-    if (presentQueue_ != VK_NULL_HANDLE) vkQueueWaitIdle(presentQueue_);
+    VkDeviceSize stagingSize = 0;
+    if (!CopySwapchainRegion(ix0, iy0, iw, ih, &stagingSize)) return;
 
-    VkDeviceSize stagingSize = static_cast<VkDeviceSize>(iw) * ih * 4;
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingMemory;
-    VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-    bci.size = stagingSize;
-    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (vkCreateBuffer(device_, &bci, nullptr, &stagingBuffer) != VK_SUCCESS) return;
-    VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(device_, stagingBuffer, &req);
-    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-    mai.allocationSize = req.size;
-    mai.memoryTypeIndex = FindMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (vkAllocateMemory(device_, &mai, nullptr, &stagingMemory) != VK_SUCCESS) {
-        vkDestroyBuffer(device_, stagingBuffer, nullptr);
+    // Swapchain pixels are BGRA (preferred format) or RGBA; the source buffer
+    // for BlitPixelsToTexture is 0xAARRGGBB.
+    bool rgbaOrder = (swapchainFormat_ == VK_FORMAT_R8G8B8A8_UNORM);
+    std::vector<uint32_t> argb(static_cast<size_t>(iw) * ih);
+    const uint8_t* src = static_cast<const uint8_t*>(stagingMapped_);
+    for (size_t p = 0; p < argb.size(); p++) {
+        uint8_t b0 = src[p * 4 + 0], b1 = src[p * 4 + 1];
+        uint8_t b2 = src[p * 4 + 2], b3 = src[p * 4 + 3];
+        uint8_t r = rgbaOrder ? b0 : b2;
+        uint8_t b = rgbaOrder ? b2 : b0;
+        argb[p] = (static_cast<uint32_t>(b3) << 24) | (static_cast<uint32_t>(r) << 16)
+                | (static_cast<uint32_t>(b1) << 8) | b;
+    }
+
+    // D3DXLoadSurfaceFromSurface scales the source rect to FILL the destination
+    // texture (the original game uses this for its pause bg), so blit the full
+    // requested rect into the whole target texture.
+    BlitPixelsToTexture(target, 0, 0, static_cast<int>(dst.width), static_cast<int>(dst.height),
+                        argb.data(), iw, ih);
+}
+
+bool VulkanRenderer::ReadGameImage(std::vector<uint32_t>& argbOut) {
+    argbOut.clear();
+    if (inScene_ || swapchain_ == VK_NULL_HANDLE) return false;
+    if (currentImageIndex_ >= swapchainImages_.size()) return false;
+
+    int iw = static_cast<int>(std::lround(destW_));
+    int ih = static_cast<int>(std::lround(destH_));
+    int ix0 = static_cast<int>(std::lround(destX_));
+    int iy0 = static_cast<int>(std::lround(destY_));
+    if (iw <= 0 || ih <= 0) return false;
+
+    VkDeviceSize stagingSize = 0;
+    if (!CopySwapchainRegion(ix0, iy0, iw, ih, &stagingSize)) return false;
+
+    bool rgbaOrder = (swapchainFormat_ == VK_FORMAT_R8G8B8A8_UNORM);
+    argbOut.resize(static_cast<size_t>(iw) * ih);
+    const uint8_t* src = static_cast<const uint8_t*>(stagingMapped_);
+    for (size_t p = 0; p < argbOut.size(); p++) {
+        uint8_t b0 = src[p * 4 + 0], b1 = src[p * 4 + 1];
+        uint8_t b2 = src[p * 4 + 2], b3 = src[p * 4 + 3];
+        uint8_t r = rgbaOrder ? b0 : b2;
+        uint8_t b = rgbaOrder ? b2 : b0;
+        argbOut[p] = (static_cast<uint32_t>(b3) << 24) | (static_cast<uint32_t>(r) << 16)
+                   | (static_cast<uint32_t>(b1) << 8) | b;
+    }
+    return true;
+}
+
+// ── Vertical (portrait) mode ─────────────────────────────────
+
+void VulkanRenderer::CreateVerticalComposition(int width, int height) {
+    ReleaseVerticalComposition();
+    if (device_ == VK_NULL_HANDLE) return;
+    if (!EnsureVerticalObjects(width, height)) {
+        ReleaseVerticalComposition();
         return;
     }
-    vkBindBufferMemory(device_, stagingBuffer, stagingMemory, 0);
+    verticalCompositionBuilt_ = true;
+    verticalCompositionActive_ = verticalCompositionRequested_;
+}
+
+void VulkanRenderer::ReleaseVerticalComposition() {
+    if (device_ != VK_NULL_HANDLE) {
+        if (verticalCompositionBuilt_) vkDeviceWaitIdle(device_);
+        if (composePipeline_ != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_, composePipeline_, nullptr);
+            composePipeline_ = VK_NULL_HANDLE;
+        }
+        if (composePipelineLayout_ != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_, composePipelineLayout_, nullptr);
+            composePipelineLayout_ = VK_NULL_HANDLE;
+        }
+        if (verticalFramebuffer_ != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(device_, verticalFramebuffer_, nullptr);
+            verticalFramebuffer_ = VK_NULL_HANDLE;
+        }
+        if (verticalColorView_ != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_, verticalColorView_, nullptr);
+            verticalColorView_ = VK_NULL_HANDLE;
+        }
+        if (verticalDepthView_ != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_, verticalDepthView_, nullptr);
+            verticalDepthView_ = VK_NULL_HANDLE;
+        }
+        if (verticalColorImage_ != VK_NULL_HANDLE) {
+            vkDestroyImage(device_, verticalColorImage_, nullptr);
+            vkFreeMemory(device_, verticalColorMemory_, nullptr);
+            verticalColorImage_ = VK_NULL_HANDLE;
+            verticalColorMemory_ = VK_NULL_HANDLE;
+        }
+        if (verticalDepthImage_ != VK_NULL_HANDLE) {
+            vkDestroyImage(device_, verticalDepthImage_, nullptr);
+            vkFreeMemory(device_, verticalDepthMemory_, nullptr);
+            verticalDepthImage_ = VK_NULL_HANDLE;
+            verticalDepthMemory_ = VK_NULL_HANDLE;
+        }
+        if (renderPassVertical_ != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(device_, renderPassVertical_, nullptr);
+            renderPassVertical_ = VK_NULL_HANDLE;
+        }
+        if (renderPassVerticalResume_ != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(device_, renderPassVerticalResume_, nullptr);
+            renderPassVerticalResume_ = VK_NULL_HANDLE;
+        }
+    }
+    verticalCompositionBuilt_ = false;
+    verticalCompositionActive_ = false;
+    verticalCompositionRequested_ = false;
+    verticalCompositionInGame_ = false;
+    verticalWidth_ = 0;
+    verticalHeight_ = 0;
+    if (verticalDescSet_ != VK_NULL_HANDLE) {
+        // The pool owns the set; nothing to free individually.
+        verticalDescSet_ = VK_NULL_HANDLE;
+    }
+}
+
+void VulkanRenderer::SetVerticalComposition(bool enabled) {
+    verticalCompositionRequested_ = enabled;
+    verticalCompositionActive_ = enabled && verticalCompositionBuilt_;
+}
+
+void VulkanRenderer::SetVerticalInGame(bool inGame) {
+    verticalCompositionInGame_ = inGame;
+}
+
+void VulkanRenderer::SetVerticalFlip180(bool flip) {
+    verticalCompositionFlip180_ = flip;
+}
+
+void VulkanRenderer::SetVerticalTransitionBlack(bool black) {
+    verticalCompositionTransitionBlack_ = black;
+}
+
+bool VulkanRenderer::CopySwapchainRegion(int ix0, int iy0, int iw, int ih, VkDeviceSize* outSize) {
+    if (!EnsureStaging(static_cast<VkDeviceSize>(iw) * ih * 4)) return false;
+
+    vkQueueWaitIdle(graphicsQueue_);
+    if (presentQueue_ != VK_NULL_HANDLE) vkQueueWaitIdle(presentQueue_);
 
     VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
     cbai.commandPool = cmdPool_;
     cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cbai.commandBufferCount = 1;
     VkCommandBuffer cmd;
-    if (vkAllocateCommandBuffers(device_, &cbai, &cmd) != VK_SUCCESS) {
-        vkDestroyBuffer(device_, stagingBuffer, nullptr);
-        vkFreeMemory(device_, stagingMemory, nullptr);
-        return;
-    }
+    if (vkAllocateCommandBuffers(device_, &cbai, &cmd) != VK_SUCCESS) return false;
     VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &bi);
+    if (vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS) {
+        vkFreeCommandBuffers(device_, cmdPool_, 1, &cmd);
+        return false;
+    }
 
     VkImageMemoryBarrier barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -2065,7 +2560,7 @@ void VulkanRenderer::CaptureScreen(TextureHandle target, int left, int top, int 
     region.imageSubresource.layerCount = 1;
     region.imageOffset = { ix0, iy0, 0 };
     region.imageExtent = { static_cast<uint32_t>(iw), static_cast<uint32_t>(ih), 1 };
-    vkCmdCopyImageToBuffer(cmd, swapchainImages_[currentImageIndex_], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuffer, 1, &region);
+    vkCmdCopyImageToBuffer(cmd, swapchainImages_[currentImageIndex_], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuffer_, 1, &region);
 
     // Restore the present layout so the image stays presentable.
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -2082,38 +2577,8 @@ void VulkanRenderer::CaptureScreen(TextureHandle target, int left, int top, int 
     vkQueueSubmit(graphicsQueue_, 1, &si, VK_NULL_HANDLE);
     vkQueueWaitIdle(graphicsQueue_);
     vkFreeCommandBuffers(device_, cmdPool_, 1, &cmd);
-
-    void* mapped;
-    if (vkMapMemory(device_, stagingMemory, 0, stagingSize, 0, &mapped) == VK_SUCCESS) {
-        // Swapchain pixels are BGRA (preferred format) or RGBA; the source
-        // buffer for BlitPixelsToTexture is 0xAARRGGBB.
-        bool rgbaOrder = (swapchainFormat_ == VK_FORMAT_R8G8B8A8_UNORM);
-        std::vector<uint32_t> argb(static_cast<size_t>(iw) * ih);
-        const uint8_t* src = static_cast<const uint8_t*>(mapped);
-        for (size_t p = 0; p < argb.size(); p++) {
-            uint8_t b0 = src[p * 4 + 0], b1 = src[p * 4 + 1];
-            uint8_t b2 = src[p * 4 + 2], b3 = src[p * 4 + 3];
-            uint8_t r = rgbaOrder ? b0 : b2;
-            uint8_t b = rgbaOrder ? b2 : b0;
-            argb[p] = (static_cast<uint32_t>(b3) << 24) | (static_cast<uint32_t>(r) << 16)
-                    | (static_cast<uint32_t>(b1) << 8) | b;
-        }
-        vkUnmapMemory(device_, stagingMemory);
-        {
-            FILE *fp = fopen("capture_engine.bin", "wb");
-            if (fp != nullptr) {
-                uint32_t hdr[2] = { static_cast<uint32_t>(iw), static_cast<uint32_t>(ih) };
-                fwrite(hdr, sizeof(hdr), 1, fp);
-                fwrite(argb.data(), 4, argb.size(), fp);
-                fclose(fp);
-            }
-        }
-        BlitPixelsToTexture(target, 0, 0, static_cast<int>(dst.width), static_cast<int>(dst.height),
-                            argb.data(), iw, ih);
-    }
-
-    vkDestroyBuffer(device_, stagingBuffer, nullptr);
-    vkFreeMemory(device_, stagingMemory, nullptr);
+    if (outSize) *outSize = static_cast<VkDeviceSize>(iw) * ih * 4;
+    return true;
 }
 
 bool VulkanRenderer::LoadSurfaceImage(int index, const void* data, size_t size, uint32_t* outWidth,

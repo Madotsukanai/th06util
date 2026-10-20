@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <string>
+#include <vector>
 
 namespace th06 {
 
@@ -93,6 +94,31 @@ public:
                                    int srcH) = 0;
     virtual void ReleaseSurfaceImage(int index) = 0;
 
+    // ── Vertical (portrait) mode ──
+    // The offscreen render target mirrors GameWindow::verticalSurface
+    // (640 x (480 + 168)): the whole draw chain renders into it, and
+    // Present() composes the rotated portrait image onto the swapchain.
+    virtual void CreateVerticalComposition(int width, int height)
+    {
+    }
+    virtual void ReleaseVerticalComposition()
+    {
+    }
+    // Called by the game loop when the vertical surface is active for this
+    // scene; Present() only composes when this was enabled.
+    virtual void SetVerticalComposition(bool enabled)
+    {
+    }
+    virtual void SetVerticalInGame(bool inGame)
+    {
+    }
+    virtual void SetVerticalFlip180(bool flip)
+    {
+    }
+    virtual void SetVerticalTransitionBlack(bool black)
+    {
+    }
+
     // ── Text rendering (TextHelper) ──
     // Blit an ARGB8888 source image into a texture, scaling it to dstW x dstH.
     virtual void BlitPixelsToTexture(TextureHandle tex, int dstX, int dstY, int dstW, int dstH,
@@ -121,6 +147,9 @@ public:
     // Copies the source rect (in 640x480 game space) from the presented frame
     // into `target`, clipped to the texture size like D3D8 CopyRects (no scaling).
     virtual void CaptureScreen(TextureHandle target, int left, int top, int width, int height) = 0;
+    // Reads back the presented frame's letter-boxed game region (what a D3D8
+    // backbuffer of the same size would contain) as row-major 0xAARRGGBB.
+    virtual bool ReadGameImage(std::vector<uint32_t>& argbOut) = 0;
 };
 
 extern IRenderer* g_Renderer;

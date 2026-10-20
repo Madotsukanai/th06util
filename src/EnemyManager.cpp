@@ -1838,6 +1838,50 @@ static void DrawEnemyContactBoxes(EnemyManager *mgr)
     const f32 oy = g_GameManager.arcadeRegionTopLeftPos.y;
     const D3DCOLOR col = 0xffff0000;
 
+#ifdef USE_VULKAN
+    // Ported contact-box overlay: red 2px outline quads through the shared 2D
+    // path; none of the D3D8 state save/restore below applies here.
+    TextureHandle white = g_Renderer->GetWhiteTexture();
+    for (i32 i = 0; i < mgr->enemyCount; i++)
+    {
+        Enemy *e = &mgr->enemies[i];
+        if (!e->flags.unk5 || !e->flags.unk8 || e->flags.unk15)
+            continue;
+
+        f32 hw = e->hitboxDimensions.x / 1.5f / 2.0f;
+        f32 hh = e->hitboxDimensions.y / 1.5f / 2.0f;
+        f32 cx = ox + e->position.x;
+        f32 cy = oy + e->position.y;
+        static const f32 kHitboxLineHalf = 1.0f;
+        Vertex2D edge[4];
+        // top
+        edge[0] = {cx - hw, cy - hh - kHitboxLineHalf, 0.0f, 0.0f, col, 0.0f};
+        edge[1] = {cx + hw, cy - hh - kHitboxLineHalf, 0.0f, 0.0f, col, 0.0f};
+        edge[2] = {cx - hw, cy - hh + kHitboxLineHalf, 0.0f, 0.0f, col, 0.0f};
+        edge[3] = {cx + hw, cy - hh + kHitboxLineHalf, 0.0f, 0.0f, col, 0.0f};
+        g_Renderer->DrawQuad2D(white, edge, BLEND_ALPHA);
+        // bottom
+        edge[0] = {cx - hw, cy + hh - kHitboxLineHalf, 0.0f, 0.0f, col, 0.0f};
+        edge[1] = {cx + hw, cy + hh - kHitboxLineHalf, 0.0f, 0.0f, col, 0.0f};
+        edge[2] = {cx - hw, cy + hh + kHitboxLineHalf, 0.0f, 0.0f, col, 0.0f};
+        edge[3] = {cx + hw, cy + hh + kHitboxLineHalf, 0.0f, 0.0f, col, 0.0f};
+        g_Renderer->DrawQuad2D(white, edge, BLEND_ALPHA);
+        // left
+        edge[0] = {cx - hw - kHitboxLineHalf, cy - hh, 0.0f, 0.0f, col, 0.0f};
+        edge[1] = {cx - hw + kHitboxLineHalf, cy - hh, 0.0f, 0.0f, col, 0.0f};
+        edge[2] = {cx - hw - kHitboxLineHalf, cy + hh, 0.0f, 0.0f, col, 0.0f};
+        edge[3] = {cx - hw + kHitboxLineHalf, cy + hh, 0.0f, 0.0f, col, 0.0f};
+        g_Renderer->DrawQuad2D(white, edge, BLEND_ALPHA);
+        // right
+        edge[0] = {cx + hw - kHitboxLineHalf, cy - hh, 0.0f, 0.0f, col, 0.0f};
+        edge[1] = {cx + hw + kHitboxLineHalf, cy - hh, 0.0f, 0.0f, col, 0.0f};
+        edge[2] = {cx + hw - kHitboxLineHalf, cy + hh, 0.0f, 0.0f, col, 0.0f};
+        edge[3] = {cx + hw + kHitboxLineHalf, cy + hh, 0.0f, 0.0f, col, 0.0f};
+        g_Renderer->DrawQuad2D(white, edge, BLEND_ALPHA);
+    }
+    return;
+#endif
+
     DWORD oldZWrite, oldZFunc, oldAlpha, oldSrc, oldDest, oldVS;
     IDirect3DBaseTexture8 *oldTex = NULL;
     g_Supervisor.d3dDevice->GetTexture(0, &oldTex);
@@ -1914,6 +1958,26 @@ static void DrawBossEnemyMarker(f32 bossGameX, D3DCOLOR color)
     sy_base = 478.0f;
     sy_tip = sy_base - H;
 
+#ifdef USE_VULKAN
+    // Ported boss marker: the triangle-fan below runs through the shared 2D
+    // path, so skip the D3D8 state save/restore entirely (the dummy device's
+    // GetTexture doesn't return a real object to Release).
+    {
+        const i32 SEGMENTS = 16;
+        const f32 rx = W;
+        const f32 ry = sy_base - sy_tip;
+        Vertex2D v[SEGMENTS + 2];
+        v[0] = {sx, sy_base, 0.0f, 0.0f, color, 0.0f};
+        for (i32 i = 0; i <= SEGMENTS; i++)
+        {
+            f32 angle = ZUN_PI + ZUN_PI * (f32)i / (f32)SEGMENTS;
+            v[i + 1] = { sx + rx * cosf(angle), sy_base + ry * sinf(angle), 0.0f, 0.0f, color, 0.0f };
+        }
+        g_Renderer->DrawTriangleFan2D(g_Renderer->GetWhiteTexture(), v, SEGMENTS + 2, BLEND_ALPHA);
+    }
+    return;
+#endif
+
     DWORD oldAlpha, oldSrc, oldDest, oldZWrite;
     DWORD oldColorOp, oldAlphaOp, oldColorArg1, oldAlphaArg1;
     DWORD oldVertexShader;
@@ -1964,16 +2028,7 @@ static void DrawBossEnemyMarker(f32 bossGameX, D3DCOLOR color)
         v[i + 1].rhw = 1.f;
         v[i + 1].c = color;
     }
-#ifdef USE_VULKAN
-    {
-        Vertex2D v2d[SEGMENTS + 2];
-        for (i32 i = 0; i < SEGMENTS + 2; i++)
-        {
-            v2d[i] = { v[i].x, v[i].y, 0.0f, 0.0f, v[i].c };
-        }
-        g_Renderer->DrawTriangleFan2D(g_Renderer->GetWhiteTexture(), v2d, SEGMENTS + 2, BLEND_ALPHA);
-    }
-#else
+#ifndef USE_VULKAN
     g_Supervisor.d3dDevice->DrawPrimitiveUP(D3DPT_TRIANGLEFAN, SEGMENTS, v, sizeof(RHW));
 #endif
 

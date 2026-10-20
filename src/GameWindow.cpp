@@ -134,6 +134,12 @@ RECT GameWindow::GetAspectRatioDestRect(HWND window)
 void GameWindow::CreateVerticalSurface()
 {
     ReleaseVerticalSurface();
+#ifdef USE_VULKAN
+    g_Renderer->CreateVerticalComposition(GAME_WINDOW_WIDTH, GAME_WINDOW_HEIGHT + 168);
+    verticalSurface = g_VerticalMode ? (IDirect3DSurface8 *)1 : NULL;
+    verticalDepth = NULL;
+    return;
+#endif
     D3DDISPLAYMODE mode;
     g_Supervisor.d3dIface->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &mode);
 
@@ -146,6 +152,12 @@ void GameWindow::CreateVerticalSurface()
 
 void GameWindow::ReleaseVerticalSurface()
 {
+#ifdef USE_VULKAN
+    g_Renderer->ReleaseVerticalComposition();
+    verticalSurface = NULL;
+    verticalDepth = NULL;
+    return;
+#endif
     if (verticalSurface)
     {
         verticalSurface->Release();
@@ -357,6 +369,15 @@ RenderResult GameWindow::Render()
     if (shouldRenderAndPresent && g_Supervisor.cfg.frameskipConfig <= this->curFrame)
     {
 #ifdef USE_VULKAN
+        {
+            bool nowInGame = (g_Supervisor.curState == SUPERVISOR_STATE_GAMEMANAGER);
+            if (nowInGame != s_lastFrameWasInGame)
+                g_Renderer->SetVerticalTransitionBlack(true);
+            s_lastFrameWasInGame = nowInGame;
+        }
+        g_Renderer->SetVerticalComposition(g_VerticalMode && verticalSurface != NULL);
+        g_Renderer->SetVerticalInGame(s_lastFrameWasInGame);
+        g_Renderer->SetVerticalFlip180(g_VerticalMode == 2);
         g_Renderer->BeginScene();
         g_Renderer->Clear(0x00000000, true);
         g_Chain.RunDrawChain();

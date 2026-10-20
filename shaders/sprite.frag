@@ -12,10 +12,16 @@ layout(push_constant) uniform PushConstants {
     vec4 colorKey;
     float colorKeyEnable;
     float colorOpAdd; // 1.0 = D3DTOP_ADD (flash), 0.0 = D3DTOP_MODULATE
+    // D3D8 texel-center origin convention: a texture coordinate of k/size
+    // addresses the CENTER of texel k, while Vulkan/OpenGL address the texel
+    // EDGE. The renderer stores (0.5/width, 0.5/height) here so that
+    // uv + halfTexel reproduces the historical Direct3D sampling positions.
+    float halfTexelU;
+    float halfTexelV;
 } pc;
 
 void main() {
-    vec4 texColor = texture(texSampler, fragTexCoord);
+    vec4 texColor = texture(texSampler, fragTexCoord + vec2(pc.halfTexelU, pc.halfTexelV));
 
     if (pc.colorKeyEnable > 0.5) {
         vec3 diff = abs(texColor.rgb - pc.colorKey.rgb);

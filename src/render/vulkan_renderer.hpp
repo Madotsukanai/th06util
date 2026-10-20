@@ -35,9 +35,6 @@ struct Batch2D {
     TextureHandle texture = INVALID_TEXTURE;
     BlendMode blendMode = BLEND_ALPHA;
     bool colorOpAdd = false;
-    // D3D viewport (640x480 space) the quads were submitted under. Pre-transformed
-    // quads are clipped by the viewport in D3D, so it becomes the scissor here.
-    int vpX = 0, vpY = 0, vpW = 640, vpH = 480;
     // Vertices are bump-allocated by byte offset (2D and 3D vertices have different
     // strides, so a shared vertex index would make them overwrite each other).
     // Indices are local to the batch.
@@ -52,7 +49,10 @@ struct PushConstants2D {
     float colorKey[4];
     float colorKeyEnable;
     float colorOpAdd;
-    float pad[2];
+    // D3D8 texel-center origin convention: see sprite.frag. The renderer sets
+    // these to (0.5/width, 0.5/height) of the texture bound to the batch.
+    float halfTexelU;
+    float halfTexelV;
 };
 
 struct PushConstants3D {
@@ -123,8 +123,17 @@ public:
     void SetDepthWrite(bool enable) override { depthWrite_ = enable; }
 
     void CaptureScreen(TextureHandle target, int left, int top, int width, int height) override;
+    bool ReadGameImage(std::vector<uint32_t>& argbOut) override;
+
+    void CreateVerticalComposition(int width, int height) override;
+    void ReleaseVerticalComposition() override;
+    void SetVerticalComposition(bool enabled) override;
+    void SetVerticalInGame(bool inGame) override;
+    void SetVerticalFlip180(bool flip) override;
+    void SetVerticalTransitionBlack(bool black) override;
 
 private:
+    bool EnsureVerticalObjects(int width, int height);
     bool InitVulkan();
     bool CreateSwapchain();
     bool CreateRenderPass();
@@ -136,17 +145,16 @@ private:
     void CleanupSwapchain();
     bool RecreateSwapchain();
     void UpdateDestRect();
-
-    // Resolves the texture to draw with (uploads it if dirty, falls back to the
-    // white texture for unknown handles). Returns false when nothing can be drawn.
-    bool ResolveTexture(TextureHandle& tex);
-    // Opens (or continues) a 2D batch for the given state. Returns false if the
-    // per-frame vertex/index budget would be exceeded.
-    bool BeginBatch2D(TextureHandle tex, BlendMode blend, uint32_t vertexCount, uint32_t indexCount);
+    void ReleaseStaging();
+    bool EnsureStaging(VkDeviceSize bytes);
+    // Copies a rect of the current swapchain image into the staging buffer
+    // (mapped as ARGB in stagingMapped_) and returns true on success.
+    bool CopySwapchainRegion(int ix0, int iy0, int iw, int ih, VkDeviceSize* outSize);
 
     void FlushBatch2D();
-    void FlushBatch3D();
-    void ApplyFullViewport();
+    // Applies the letter-boxed game viewport (or the current game viewport
+    // clipped to it) as the dynamic viewport+scissor.
+    void ApplyDrawViewport(bool useGameViewport, float minZ, float maxZ);
     void ApplyGameViewport();
     void UploadTextureGPU(TextureHandle handle);
     uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
@@ -184,10 +192,16 @@ private:
     VkFormat depthFormat_ = VK_FORMAT_D32_SFLOAT;
 
     VkRenderPass renderPass_ = VK_NULL_HANDLE;
+    // Variant used when Clear(false) restarts a scene: the colour attachment
+    // is cleared but the depth buffer keeps its contents (LOAD_OP_LOAD).
+    VkRenderPass renderPassResume_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool descPool_ = VK_NULL_HANDLE;
     VkSampler sampler_ = VK_NULL_HANDLE;
     VkSampler samplerClamp_ = VK_NULL_HANDLE;
+    // NEAREST + clamp: used by the vertical composition so the rotated portrait
+    // blits sample whole source pixels (matches the fork's CPU LockRect blit).
+    VkSampler samplerVerticalNearest_ = VK_NULL_HANDLE;
     VkCommandPool cmdPool_ = VK_NULL_HANDLE;
 
     // 2D Sprite Pipelines
@@ -196,19 +210,56 @@ private:
     VkPipeline spritePipelineAdd_ = VK_NULL_HANDLE;
     VkPipeline spritePipelineSub_ = VK_NULL_HANDLE;
 
-    // 3D Stage Pipeline (depth write on / off variants)
+    // 3D Stage Pipeline (alpha / add / subtract, depth write on / off)
     VkPipelineLayout stagePipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline stagePipelineAlpha_ = VK_NULL_HANDLE;
     VkPipeline stagePipelineAdd_ = VK_NULL_HANDLE;
+    VkPipeline stagePipelineSub_ = VK_NULL_HANDLE;
     VkPipeline stagePipelineAlphaNoZ_ = VK_NULL_HANDLE;
     VkPipeline stagePipelineAddNoZ_ = VK_NULL_HANDLE;
+
+    // ── Vertical (portrait) mode ──
+    // Offscreen (640 x 648) target the whole scene renders into while the
+    // vertical mode draws; Present() then composes the rotated image onto the
+    // swapchain. See shaders/vertical.frag for the exact mapping.
+    int verticalWidth_ = 0;
+    int verticalHeight_ = 0;
+    VkRenderPass renderPassVertical_ = VK_NULL_HANDLE;
+    VkRenderPass renderPassVerticalResume_ = VK_NULL_HANDLE;
+    VkImage verticalColorImage_ = VK_NULL_HANDLE;
+    VkDeviceMemory verticalColorMemory_ = VK_NULL_HANDLE;
+    VkImageView verticalColorView_ = VK_NULL_HANDLE;
+    VkImage verticalDepthImage_ = VK_NULL_HANDLE;
+    VkDeviceMemory verticalDepthMemory_ = VK_NULL_HANDLE;
+    VkImageView verticalDepthView_ = VK_NULL_HANDLE;
+    VkFramebuffer verticalFramebuffer_ = VK_NULL_HANDLE;
+    VkPipelineLayout composePipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline composePipeline_ = VK_NULL_HANDLE;
+    VkDescriptorSet verticalDescSet_ = VK_NULL_HANDLE;
+    bool verticalCompositionBuilt_ = false;
+    bool verticalCompositionActive_ = false;
+    bool verticalCompositionRequested_ = false;
+    bool verticalCompositionInGame_ = false;
+    bool verticalCompositionFlip180_ = false;
+    bool verticalCompositionTransitionBlack_ = false;
 
     std::array<FrameResource, MAX_FRAMES_IN_FLIGHT> frames_;
     uint32_t currentFrame_ = 0;
     uint32_t currentImageIndex_ = 0;
     bool inScene_ = false;
     bool frameReady_ = false;
+    // True while a render pass is open on the current command buffer.
+    bool passActive_ = false;
     float clearColor_[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    // Whether the last Clear() asked for a depth clear too.
+    bool clearDepth_ = true;
+
+    // Persistent staging buffer for texture uploads.
+    VkBuffer stagingBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMemory_ = VK_NULL_HANDLE;
+    void* stagingMapped_ = nullptr;
+    VkDeviceSize stagingCapacity_ = 0;
+    VkFence uploadFence_ = VK_NULL_HANDLE;
 
     // Batching state
     // 2D and 3D vertices are both 24 bytes and share one bump-allocated

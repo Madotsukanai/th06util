@@ -20,7 +20,6 @@ u8 *FileSystem::OpenPath(const char *filepath, int isExternalResource)
     i32 pbg3Idx;
 
     entryIdx = -1;
-    utils::DbgLog("[FS] open '%s' ext=%d", filepath, isExternalResource);
     if (isExternalResource == 0)
     {
         entryname = strrchr(filepath, '\\');
@@ -57,10 +56,8 @@ u8 *FileSystem::OpenPath(const char *filepath, int isExternalResource)
         }
         if (entryIdx < 0)
         {
-            utils::DbgLog("[FS] MISS '%s'", entryname);
             return NULL;
         }
-        utils::DbgLog("[FS] HIT '%s' idx=%d arc=%d", entryname, entryIdx, pbg3Idx);
     }
     if (entryIdx >= 0)
     {

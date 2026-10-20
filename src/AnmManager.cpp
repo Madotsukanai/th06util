@@ -1,4 +1,5 @@
 #include "AnmManager.hpp"
+#include "AsciiManager.hpp"
 #include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
 #include "GameWindow.hpp"
@@ -176,7 +177,6 @@ ZunResult AnmManager::LoadTexture(i32 textureIdx, char *textureName, i32 texture
     {
         TextureHandle handle =
             g_Renderer->CreateTextureFromMemory(this->imageDataArray[textureIdx], g_LastFileSize, colorKey, this->loadTextureClampToEdge);
-        utils::DbgLog("[VkT] LoadTexture idx=%d name=%s handle=%zu", textureIdx, textureName, (size_t)handle);
         this->textures[textureIdx] = (IDirect3DTexture8 *)(uintptr_t)handle;
         if (handle == INVALID_TEXTURE)
         {
@@ -329,13 +329,6 @@ ZunResult AnmManager::LoadTextureAlphaChannel(i32 textureIdx, char *textureName,
                     }
                 }
             }
-            {
-                u32 off = (112 * dstDesc.width + 33) * 4;
-                utils::DbgLog("[ANM] alphaMerge idx=%d src=%ux%u dst=%ux%u dstBGR(33,112)=(%d,%d,%d) dstA=%d srcB=%d",
-                              textureIdx, srcDesc.width, srcDesc.height, dstDesc.width, dstDesc.height,
-                              dstPixels[off + 0], dstPixels[off + 1], dstPixels[off + 2], dstPixels[off + 3],
-                              srcPixels[off + 0]);
-            }
         }
         g_Renderer->UnlockTexture(srcTex);
         g_Renderer->UnlockTexture(dstTex);
@@ -483,11 +476,9 @@ ZunResult AnmManager::LoadAnm(i32 anmIdx, const char *path, i32 spriteIdxOffset)
 
     AnmRawEntry *anm = this->anmFiles[anmIdx];
 
-    utils::DbgLog("[ANM] LoadAnm idx=%d path=%s ptr=%p", anmIdx, path, anm);
 
     if (anm == NULL)
     {
-        utils::DbgLog("[ANM] LoadAnm FAILED idx=%d path=%s", anmIdx, path);
         g_GameErrorContext.Fatal(TH_ERR_ANMMANAGER_SPRITE_CORRUPTED, path);
         return ZUN_ERROR;
     }
@@ -496,7 +487,6 @@ ZunResult AnmManager::LoadAnm(i32 anmIdx, const char *path, i32 spriteIdxOffset)
 
     char *anmName = (char *)((u8 *)anm + anm->nameOffset);
 
-    utils::DbgLog("[ANM] LoadAnm idx=%d name=%s w=%d h=%d", anmIdx, anmName, anm->width, anm->height);
 
 #ifdef USE_VULKAN
     // Decide the sampler wrap mode for this texture now: it is needed by
@@ -525,7 +515,6 @@ ZunResult AnmManager::LoadAnm(i32 anmIdx, const char *path, i32 spriteIdxOffset)
         if (anySpriteTouchesBorder && !this->AnmUsesUvScroll(anm))
         {
             this->loadTextureClampToEdge = true;
-            utils::DbgLog("[ANM] LoadAnm idx=%d border sprites, clamp-to-edge sampler", anmIdx);
         }
     }
 #endif
@@ -639,6 +628,23 @@ void AnmManager::BuildSpriteDecoys(i32 anmIdx)
     }
     memset(inRect, 0, pixelCount);
 
+    // The text system (TextHelper::RenderTextToTexture) blits a full-width
+    // 16-pixel-tall strip into rows [yPos, yPos+16) of the sprite's texture on
+    // every string render, where yPos is the text sprite's rectangle top. The
+    // text sprites' rects all start at row 0, so rows 0..15 of every texture
+    // are rewritten at runtime and must not hold decoys. Sprites whose rects
+    // intersect that band keep their original rects too: redirecting them to a
+    // decoy copy would sample a stale snapshot that text renders acidly
+    // overwrite (garbled glyphs in dialogue/HUD strings).
+    const i32 dynamicTextY1 = 16;
+    for (i32 y = 0; y < dynamicTextY1 && y < (i32)h; y++)
+    {
+        for (i32 x = 0; x < (i32)w; x++)
+        {
+            inRect[y * w + x] = 1;
+        }
+    }
+
     struct DecoyJob
     {
         i32 spriteIdx;
@@ -661,7 +667,6 @@ void AnmManager::BuildSpriteDecoys(i32 anmIdx)
         if (fx0 != (f32)(i32)fx0 || fy0 != (f32)(i32)fy0 || fw != (f32)(i32)fw || fh != (f32)(i32)fh || fw <= 0.0f ||
             fh <= 0.0f)
         {
-            utils::DbgLog("[ANM] decoy skip sprite=%d non-integer rect", (int)rawSprite->id);
             continue;
         }
         i32 sx0 = (i32)fx0;
@@ -670,7 +675,10 @@ void AnmManager::BuildSpriteDecoys(i32 anmIdx)
         i32 sh = (i32)fh;
         if (sx0 < 0 || sy0 < 0 || sx0 + sw > (i32)w || sy0 + sh > (i32)h)
         {
-            utils::DbgLog("[ANM] decoy skip sprite=%d rect out of bounds", (int)rawSprite->id);
+            continue;
+        }
+        if (sy0 < dynamicTextY1)
+        {
             continue;
         }
         for (i32 y = sy0; y < sy0 + sh; y++)
@@ -712,7 +720,6 @@ void AnmManager::BuildSpriteDecoys(i32 anmIdx)
     u32 *rectCol = new u32[iw];
     u32 *rectPrefix = new u32[iw + 1];
 
-    i32 placedCount = 0;
     for (i32 jobIdx = 0; jobIdx < numJobs; jobIdx++)
     {
         DecoyJob *job = &jobs[jobIdx];
@@ -806,8 +813,6 @@ void AnmManager::BuildSpriteDecoys(i32 anmIdx)
 
         if (findX < 0)
         {
-            utils::DbgLog("[ANM] decoy skip sprite=%d rect=(%d,%d,%d,%d) no space", job->spriteIdx, job->sx, job->sy,
-                          job->sw, job->sh);
             continue;
         }
 
@@ -900,30 +905,6 @@ void AnmManager::BuildSpriteDecoys(i32 anmIdx)
         sp->uvEnd.x = sp->endPixelInclusive.x / sp->textureWidth;
         sp->uvStart.y = sp->startPixelInclusive.y / sp->textureHeight;
         sp->uvEnd.y = sp->endPixelInclusive.y / sp->textureHeight;
-
-        utils::DbgLog("[ANM] decoy sprite=%d idx=%d rect=(%d,%d,%d,%d) -> decoy=(%d,%d) %dx%d", job->spriteIdx,
-                      job->spriteIdx, job->sx, job->sy, job->sw, job->sh, dx, dy, job->sw, job->sh);
-        placedCount++;
-    }
-
-    utils::DbgLog("[ANM] decoy summary idx=%d placed=%d total=%d", anmIdx, placedCount, numJobs);
-
-    if (anmIdx == 1 || anmIdx == 2)
-    {
-        for (i32 k = 111; k <= 113; k++)
-        {
-            AnmLoadedSprite *dsp = &this->sprites[k + anm->spriteIdxOffset];
-            utils::DbgLog("[ANM] final sprite=%d uvStart=(%.5f,%.5f) uvEnd=(%.5f,%.5f)", k, dsp->uvStart.x,
-                          dsp->uvStart.y, dsp->uvEnd.x, dsp->uvEnd.y);
-        }
-        char dumpPath[64];
-        snprintf(dumpPath, sizeof(dumpPath), "anm%d_engine.bin", anmIdx);
-        FILE *fp = fopen(dumpPath, "wb");
-        if (fp != NULL)
-        {
-            fwrite(px, 1, (size_t)w * h * 4, fp);
-            fclose(fp);
-        }
     }
 
     delete[] used;
@@ -935,6 +916,7 @@ void AnmManager::BuildSpriteDecoys(i32 anmIdx)
 
     g_Renderer->UnlockTexture(tex);
 }
+
 #endif
 
 void AnmManager::ReleaseAnm(i32 anmIdx)
@@ -1200,8 +1182,6 @@ ZunResult AnmManager::DrawInner(AnmVm *vm, i32 param_3)
         ptrdiff_t spi = vm->sprite - this->sprites;
         if (spi >= 108 && spi <= 118)
         {
-            utils::DbgLog("[ANM] draw idx=%d uv=(%.5f,%.5f)-(%.5f,%.5f) tex=%zu col=%08x", (int)spi, v2d[0].u, v2d[0].v,
-                          v2d[3].u, v2d[3].v, (size_t)tex, (unsigned)vm->color);
         }
     }
     g_Renderer->DrawQuad2D(tex, v2d, blend);

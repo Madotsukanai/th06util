@@ -1,4 +1,5 @@
 #include "platform_sdl.hpp"
+#include "renderer.hpp"
 #include <SDL2/SDL_vulkan.h>
 #include <cstdio>
 #include <string>
@@ -114,6 +115,17 @@ bool PlatformWindow::PollEvents() {
         if (ev.type == SDL_QUIT) {
             shouldQuit_ = true;
             return false;
+        }
+        if (ev.type == SDL_WINDOWEVENT) {
+            if (ev.window.event == SDL_WINDOWEVENT_RESIZED ||
+                ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                if (g_Renderer != nullptr) {
+                    g_Renderer->OnWindowResize(ev.window.data1, ev.window.data2);
+                }
+            } else if (ev.window.event == SDL_WINDOWEVENT_CLOSE) {
+                shouldQuit_ = true;
+                return false;
+            }
         }
         if (ev.type == SDL_CONTROLLERDEVICEADDED) {
             if (!controller_) {
