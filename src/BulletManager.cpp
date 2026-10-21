@@ -23,7 +23,7 @@ BulletManager g_BulletManager;
 ChainElem g_BulletManagerCalcChain;
 ChainElem g_BulletManagerDrawChain;
 
-u32 *g_EffectsColor = g_EffectsColorWithTextureBlending;
+u32 *g_EffectsColor = g_EffectsColorWithoutTextureBlending;
 
 struct BulletTypeInfo
 {
@@ -603,14 +603,13 @@ ZunResult BulletManager::RegisterChain(char *bulletAnmPath)
 {
     BulletManager *mgr = &g_BulletManager;
 
-    // FX colour table: when D3D8 hardware texture blending is enabled (the
-    // vanilla default, also what our Vulkan MODULATE pipeline reproduces) the
-    // vivid per-FX colours must come from the *with-blending* table; the
-    // without-blending table only holds the pale fallback tints for the
-    // D3DTOP_ADD software path. Branches were swapped before, which rendered
-    // every ECL-spawned hit/spell FX (boss-hit glow, spell-declare spiral)
-    // washed-out pallid instead of its stage colour.
-    if (((g_Supervisor.cfg.opts >> GCOS_USE_D3D_HW_TEXTURE_BLENDING) & 1) != 0)
+    // In TH06, GCOS_USE_D3D_HW_TEXTURE_BLENDING (bit 0) being 1 indicates that
+    // D3D hardware texture blending (D3DTOP_ADD) is disabled (the default config).
+    // In this mode, COLOROP remains MODULATE and FX colors come from
+    // g_EffectsColorWithoutTextureBlending (pale pastel tints that brighten via BLEND_ADD).
+    // When bit 0 is 0 (hardware texture blending enabled), vivid colors from
+    // g_EffectsColorWithTextureBlending are used with D3DTOP_ADD.
+    if (((g_Supervisor.cfg.opts >> GCOS_USE_D3D_HW_TEXTURE_BLENDING) & 1) == 0)
     {
         g_EffectsColor = g_EffectsColorWithTextureBlending;
     }

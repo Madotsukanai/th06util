@@ -292,6 +292,7 @@ ChainCallbackResult EffectManager::OnDraw(EffectManager *mgr)
 
         effect->vm.pos = effect->pos1;
         g_AnmManager->Draw3(&effect->vm);
+#ifdef USE_VULKAN
         // TEMP diagnostics: during the boss-damage armed window, dump every
         // live effect VM state so the blob colour/blend/sprite is directly
         // attributable to a specific effect script.
@@ -309,6 +310,7 @@ ChainCallbackResult EffectManager::OnDraw(EffectManager *mgr)
                     (int)(effect->vm.flags.blendMode), (double)effect->pos1.x, (double)effect->pos1.y);
             }
         }
+#endif
     }
 
     return CHAIN_CALLBACK_RESULT_CONTINUE;
