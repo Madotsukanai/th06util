@@ -43,3 +43,4 @@ __pycache__/
 .pytest_cache/
 .aider*
 build.sh
+shaders/*.spv

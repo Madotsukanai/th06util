@@ -55,6 +55,7 @@ ZunResult SoundPlayer::InitializeDSound(HWND gameWindow)
     this->manager = new CSoundManager();
     if (this->manager->Initialize(gameWindow, 2, 2, 44100, 16) < ZUN_SUCCESS)
     {
+        th06::utils::LogDebug("InitializeDSound: CSoundManager::Initialize FAILED (SE WAV BGM will be silent)");
         g_GameErrorContext.Log(TH_ERR_SOUNDPLAYER_FAILED_TO_INITIALIZE_OBJECT);
         if (this->manager != NULL)
         {
@@ -81,11 +82,13 @@ ZunResult SoundPlayer::InitializeDSound(HWND gameWindow)
     bufDesc.lpwfxFormat = &wavFormat;
     if (this->dsoundHdl->CreateSoundBuffer(&bufDesc, &this->initSoundBuffer, NULL) < ZUN_SUCCESS)
     {
+        th06::utils::LogDebug("InitializeDSound: CreateSoundBuffer(initSoundBuffer) FAILED");
         return ZUN_ERROR;
     }
     if (this->initSoundBuffer->Lock(0, BACKGROUND_MUSIC_BUFFER_SIZE, &audioBuffer1Start, &audioBuffer1Len,
                                     &audioBuffer2Start, &audioBuffer2Len, 0) < ZUN_SUCCESS)
     {
+        th06::utils::LogDebug("InitializeDSound: initSoundBuffer->Lock FAILED");
         return ZUN_ERROR;
     }
 
@@ -216,27 +219,34 @@ ZunResult SoundPlayer::LoadWav(char *path)
 
     if (this->manager == NULL)
     {
+        th06::utils::LogDebug("LoadWav: skipped (manager == NULL) path=%s", path);
         return ZUN_ERROR;
     }
     if (g_Supervisor.cfg.playSounds == 0)
     {
+        th06::utils::LogDebug("LoadWav: skipped (cfg.playSounds == 0) path=%s", path);
         return ZUN_ERROR;
     }
     if (this->dsoundHdl == NULL)
     {
+        th06::utils::LogDebug("LoadWav: skipped (dsoundHdl == NULL) path=%s", path);
         return ZUN_ERROR;
     }
+    th06::utils::LogDebug("LoadWav: path=%s playSounds=%d bgmVol=%d", path, (int)g_Supervisor.cfg.playSounds,
+                          (int)g_CustomBgmVolume);
     this->StopBGM();
     utils::DebugPrint2("load BGM\n");
     res = waveFile.Open(path, NULL, WAVEFILE_READ);
     if (FAILED(res))
     {
         utils::DebugPrint2("error : wav file load error %s\n", path);
+        th06::utils::LogDebug("LoadWav: CWaveFile::Open FAILED hr=0x%08x path=%s", (unsigned)res, path);
         waveFile.Close();
         return ZUN_ERROR;
     }
     if (waveFile.GetSize() == 0)
     {
+        th06::utils::LogDebug("LoadWav: empty wav (size==0) path=%s", path);
         waveFile.Close();
         return ZUN_ERROR;
     }
@@ -262,6 +272,7 @@ ZunResult SoundPlayer::LoadWav(char *path)
     if (FAILED(res))
     {
         utils::DebugPrint2(TH_ERR_SOUNDPLAYER_FAILED_TO_CREATE_BGM_SOUND_BUFFER);
+        th06::utils::LogDebug("LoadWav: CreateStreaming FAILED hr=0x%08x path=%s", (unsigned)res, path);
         return ZUN_ERROR;
     }
     utils::DebugPrint2("comp\n");
@@ -485,14 +496,23 @@ ZunResult SoundPlayer::PlayBGM(BOOL isLooping)
     res = this->backgroundMusic->FillBufferWithSound(buffer, isLooping);
     if (FAILED(res))
     {
+        th06::utils::LogDebug("PlayBGM: FillBufferWithSound FAILED hr=0x%08x", (unsigned)res);
         return ZUN_ERROR;
     }
     res = this->backgroundMusic->Play(0, DSBPLAY_LOOPING);
     if (FAILED(res))
     {
+        th06::utils::LogDebug("PlayBGM: streaming Play FAILED hr=0x%08x", (unsigned)res);
         return ZUN_ERROR;
     }
     utils::DebugPrint2("comp\n");
+    {
+        static i32 s_bgmStartLogCount = 0;
+        if (s_bgmStartLogCount++ < 10)
+        {
+            th06::utils::LogDebug("PlayBGM: streaming started (vol=%d isLooping=%d)", (int)vol, (int)isLooping);
+        }
+    }
     this->isLooping = isLooping;
     g_IsBgmPaused = FALSE;
     return ZUN_SUCCESS;
@@ -572,6 +592,7 @@ void SoundPlayer::PlaySounds()
 {
     i32 idx;
     i32 sndBufIdx;
+    static i32 s_sePlayLogCount = 0;
 
     if (this->manager == NULL)
     {
@@ -591,11 +612,16 @@ void SoundPlayer::PlaySounds()
         this->soundBuffersToPlay[idx] = -1;
         if (this->duplicateSoundBuffers[sndBufIdx] == NULL)
         {
+            th06::utils::LogDebug("SE: duplicateSoundBuffers[%d] == NULL (InitSoundBuffers failed?)", sndBufIdx);
             continue;
         }
         this->duplicateSoundBuffers[sndBufIdx]->Stop();
         this->duplicateSoundBuffers[sndBufIdx]->SetCurrentPosition(0);
         this->duplicateSoundBuffers[sndBufIdx]->Play(0, 0, 0);
+        if (s_sePlayLogCount++ < 20)
+        {
+            th06::utils::LogDebug("SE: Play bufferIdx=%d (SE slot %d)", sndBufIdx, this->unk408[sndBufIdx]);
+        }
     }
     return;
 }

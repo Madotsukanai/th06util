@@ -14,10 +14,15 @@ layout(push_constant) uniform PushConstants {
     vec2 fogDist; // x=near, y=far
     float fogEnable;
     float colorOpAdd; // 1.0 = D3DTOP_ADD (flash), 0.0 = D3DTOP_MODULATE
+    // D3D8 texel-center origin convention (same as sprite.frag): the renderer
+    // stores (0.5/width, 0.5/height) here so that uv + halfTexel addresses the
+    // texel centre, exactly like Direct3D sampled these quads.
+    float halfTexelU;
+    float halfTexelV;
 } pc;
 
 void main() {
-    vec4 texColor = texture(texSampler, fragTexCoord);
+    vec4 texColor = texture(texSampler, fragTexCoord + vec2(pc.halfTexelU, pc.halfTexelV));
     vec4 col;
     if (pc.colorOpAdd > 0.5) {
         col = vec4(clamp(texColor.rgb + fragColor.rgb, 0.0, 1.0), texColor.a * fragColor.a);

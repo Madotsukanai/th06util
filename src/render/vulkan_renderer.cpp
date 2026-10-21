@@ -6,6 +6,7 @@
 #include <SDL2/SDL_vulkan.h>
 
 #include "../GameErrorContext.hpp"
+#include "../utils.hpp"
 #define STB_IMAGE_IMPLEMENTATION
 #include "../../3rdparty/stb_image.h"
 
@@ -1473,6 +1474,7 @@ void VulkanRenderer::BeginScene() {
 
 void VulkanRenderer::EndScene() {
     if (!inScene_) return;
+    extern int g_snifferFlashArmed; // DIAG(sniff), defined below near SniffSuspectQuad
 
     FlushBatch2D();
 
@@ -1485,6 +1487,9 @@ void VulkanRenderer::EndScene() {
 
     inScene_ = false;
     frameReady_ = true;
+    if (g_snifferFlashArmed > 0) {
+        g_snifferFlashArmed--;
+    }
 }
 
 void VulkanRenderer::Present() {
@@ -1715,12 +1720,69 @@ void VulkanRenderer::ApplyGameViewport() {
 
 // ── 2D Drawing ───────────────────────────────────────────────
 
+// DIAG(sniff): catch quads whose vertex colour is green-dominant (emerald) or
+// near-black while alpha stays opaque — the suspected missing pieces behind the
+// stage-3/emerald & stage-6/black boss-hit flashes. Caps keep the log bounded.
+// While g_snifferFlashArmed > 0 (set by EnemyManager on boss damage frames),
+// every quad is logged unfiltered for a short window so whatever is actually
+// drawn on the hit frame can be identified directly.
+int g_snifferFlashArmed = 0;
+
+static void SniffSuspectQuad(const char *tag, uint32_t tex, int blend, uint32_t c0, uint32_t c2, float px, float py,
+                             float pz, float u0, float v0, float u2, float v2)
+{
+    static int sGreen = 0;
+    static int sBlack = 0;
+    static int sFlash = 0;
+    uint32_t r0 = (c0 >> 16) & 255, g0 = (c0 >> 8) & 255, b0 = c0 & 255, a0 = (c0 >> 24) & 255;
+    uint32_t r2 = (c2 >> 16) & 255, g2 = (c2 >> 8) & 255, b2 = c2 & 255;
+    bool green = (g0 >= 80 && r0 * 2 <= g0 && b0 * 2 <= g0);
+    bool green2 = (g2 >= 80 && r2 * 2 <= g2 && b2 * 2 <= g2);
+    bool black = (r0 <= 14 && g0 <= 14 && b0 <= 14 && a0 >= 16);
+    // Teal/green-blue blobs from the hit screenshot: g and b both bright
+    // while red lags far behind (screenshots show ~ (32..64, 112, 96)).
+    bool teal = (g0 >= 0x60 && b0 >= 0x60 && r0 * 3 <= g0 && r0 * 3 <= b0);
+    bool teal2 = (g2 >= 0x60 && b2 >= 0x60 && r2 * 3 <= g2 && r2 * 3 <= b2);
+    static int sTeal = 0;
+    if ((teal || teal2) && sTeal < 400)
+    {
+        sTeal++;
+        if ((sTeal & 7) == 1)
+            th06::utils::LogDebug(
+                "SNIFFT %s tex=%u blend=%d c0=0x%08x c2=0x%08x pos=(%.0f,%.0f,%.0f) uv=(%.3f,%.3f)-(%.3f,%.3f)", tag,
+                tex, blend, c0, c2, px, py, pz, u0, v0, u2, v2);
+    }
+    if (g_snifferFlashArmed > 0 && sFlash < 800)
+    {
+        sFlash++;
+        if ((sFlash & 7) == 1)
+            th06::utils::LogDebug(
+                "FLASH %s tex=%u blend=%d c0=0x%08x c2=0x%08x pos=(%.0f,%.0f,%.0f) uv=(%.3f,%.3f)-(%.3f,%.3f) armed=%d",
+                tag, tex, blend, c0, c2, px, py, pz, u0, v0, u2, v2, (int)g_snifferFlashArmed);
+    }
+    if ((green || green2) && sGreen < 600)
+    {
+        sGreen++;
+        if ((sGreen & 15) == 1)
+            th06::utils::LogDebug("SNIFFG %s tex=%u blend=%d c0=0x%08x c2=0x%08x pos=(%.0f,%.0f,%.0f)", tag, tex,
+                                  blend, c0, c2, px, py, pz);
+    }
+    if (black && sBlack < 600)
+    {
+        sBlack++;
+        if ((sBlack & 63) == 1)
+            th06::utils::LogDebug("SNIFFK %s tex=%u blend=%d c0=0x%08x pos=(%.0f,%.0f,%.0f)", tag, tex, blend, c0, px,
+                                  py, pz);
+    }
+}
+
 void VulkanRenderer::DrawQuad2D(TextureHandle tex, const Vertex2D v[4], BlendMode blend) {
     if (!inScene_) return;
     if (tex >= textures_.size() || !textures_[tex].valid) {
         tex = whiteTexture_;
     }
     if (tex == INVALID_TEXTURE) return;
+    SniffSuspectQuad("2D", tex, (int)blend, v[0].color, v[2].color, v[0].x, v[0].y, 0.0f, v[0].u, v[0].v, v[2].u, v[2].v);
 
     if (textures_[tex].dirty) {
         UploadTextureGPU(tex);
@@ -1777,6 +1839,7 @@ void VulkanRenderer::DrawQuad2D(TextureHandle tex, const Vertex2D v[4], BlendMod
 }
 
 void VulkanRenderer::DrawColoredQuad2D(const Vertex2D v[4], BlendMode blend) {
+    SniffSuspectQuad("CF", whiteTexture_, (int)blend, v[0].color, v[2].color, v[0].x, v[0].y, 0.0f, v[0].u, v[0].v, v[2].u, v[2].v);
     DrawQuad2D(whiteTexture_, v, blend);
 }
 
@@ -1784,6 +1847,7 @@ void VulkanRenderer::DrawTriangleStrip2D(TextureHandle tex, const Vertex2D* vert
     if (count < 3) return;
     if (tex >= textures_.size() || !textures_[tex].valid) tex = whiteTexture_;
     if (tex == INVALID_TEXTURE) return;
+    SniffSuspectQuad("TS", tex, (int)blend, verts[0].color, verts[1].color, verts[0].x, verts[0].y, 0.0f, verts[0].u, verts[0].v, verts[1].u, verts[1].v);
     if (textures_[tex].dirty) UploadTextureGPU(tex);
 
     size_t numTriangles = count - 2;
@@ -2002,6 +2066,30 @@ void VulkanRenderer::DrawQuad3D(const float world[16], TextureHandle tex, const 
 
     if (tex >= textures_.size() || !textures_[tex].valid) tex = whiteTexture_;
     if (tex == INVALID_TEXTURE) return;
+    SniffSuspectQuad("3D", tex, (int)blend, v[0].color, v[2].color, v[0].x, v[0].y, v[0].z, v[0].u, v[0].v, v[2].u, v[2].v);
+
+    // DIAG(fogw): compute clip-space w per 3D quad on the CPU and log the
+    // fog outcome for every draw whose w makes it fully fogged (w >= far) or
+    // unfogged, so the boss-damage black/green flash can be pinned on the
+    // fog-mix path if applicable.
+    {
+        float w0 = v[0].x * viewProjMatrix_[3] + v[0].y * viewProjMatrix_[7] + v[0].z * viewProjMatrix_[11] + viewProjMatrix_[15];
+        static int sFogWCount = 0;
+        bool fullyFogged = fogEnable_ && fogFar_ > fogNear_ && w0 >= fogFar_;
+        bool fullyClear = fogEnable_ && fogFar_ > fogNear_ && w0 <= fogNear_;
+        if ((fullyFogged || fullyClear) && sFogWCount < 160)
+        {
+            sFogWCount++;
+            if ((sFogWCount & 15) == 1)
+            {
+                th06::utils::LogDebug(
+                    "FOGW tex=%u blend=%d w=%.1f near=%.0f far=%.0f %s fog=0x%08x col=0x%08x pos=(%.0f,%.0f,%.0f)",
+                    (int)tex, (int)blend, (double)w0, (double)fogNear_, (double)fogFar_,
+                    fullyFogged ? "FULLFOG" : (fullyClear ? "CLEAR" : "PARTIAL"), (u32)fogColor_, (u32)v[0].color,
+                    (double)v[0].x, (double)v[0].y, (double)v[0].z);
+            }
+        }
+    }
 
     if (textures_[tex].dirty) UploadTextureGPU(tex);
 
@@ -2043,6 +2131,15 @@ void VulkanRenderer::DrawQuad3D(const float world[16], TextureHandle tex, const 
     pc3D.fogDist[1] = fogFar_;
     pc3D.fogEnable = fogEnable_ ? 1.0f : 0.0f;
     pc3D.colorOpAdd = colorOpAdd_ ? 1.0f : 0.0f;
+    // D3D8 texel-centre correction (see sprite.frag / PushConstants3D): matches
+    // the 2D path so Draw3 quads sample texel centres exactly like vanilla D3D8.
+    if (tex < textures_.size() && textures_[tex].valid) {
+        pc3D.halfTexelU = 0.5f / static_cast<float>(textures_[tex].width);
+        pc3D.halfTexelV = 0.5f / static_cast<float>(textures_[tex].height);
+    } else {
+        pc3D.halfTexelU = 0.0f;
+        pc3D.halfTexelV = 0.0f;
+    }
 
     vkCmdPushConstants(frame.cmdBuffer, stagePipelineLayout_,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -2055,6 +2152,25 @@ void VulkanRenderer::DrawQuad3D(const float world[16], TextureHandle tex, const 
     else if (blend == BLEND_ADD) pipeline = depthWrite_ ? stagePipelineAdd_ : stagePipelineAddNoZ_;
     else pipeline = depthWrite_ ? stagePipelineAlpha_ : stagePipelineAlphaNoZ_;
     vkCmdBindPipeline(frame.cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+    // TEMP diagnostics: periodically log the fog state actually pushed for 3D
+    // draws, so fog misconfiguration (e.g. stale black fog) can be correlated
+    // with the stage tiles that render black.
+    {
+        static u32 s_stageStateDiagCount = 0;
+        if (s_stageStateDiagCount < 50)
+        {
+            static u32 s_stageStateDiagTick = 0;
+            if (++s_stageStateDiagTick >= 400)
+            {
+                s_stageStateDiagTick = 0;
+                s_stageStateDiagCount++;
+                th06::utils::LogDebug("STAGE3D fogEn=%d fog=0x%08x near=%.0f far=%.0f blend=%d add=%d tex=%d",
+                                      (int)fogEnable_, (u32)fogColor_, (double)fogNear_, (double)fogFar_, (int)blend,
+                                      (int)colorOpAdd_, (int)tex);
+            }
+        }
+    }
 
     vkCmdBindDescriptorSets(frame.cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             stagePipelineLayout_, 0, 1,
@@ -2132,6 +2248,26 @@ TextureHandle VulkanRenderer::CreateTextureFromMemory(const void* data, size_t s
             dst[i * 4 + 3] = pixels[i * 4 + 3]; // A
         }
         UnlockTexture(handle);
+    }
+    // DIAG(texload): average colour per texture upload to verify channel order.
+    {
+        static int sCount = 0;
+        if (sCount < 160)
+        {
+            sCount++;
+            u32 ar = 0, ag = 0, ab = 0;
+            for (int i = 0; i < w * h; i++)
+            {
+                ar += pixels[i * 4 + 0];
+                ag += pixels[i * 4 + 1];
+                ab += pixels[i * 4 + 2];
+            }
+            u32 n = (u32)(w * h);
+            int cx = w / 2, cy = h / 2;
+            u8 *cp = pixels + (cy * w + cx) * 4;
+            th06::utils::LogDebug("TEXLOAD %ux%u avg=(%u,%u,%u) center=(%u,%u,%u)", (unsigned)w, (unsigned)h,
+                                  ar / n, ag / n, ab / n, cp[0], cp[1], cp[2]);
+        }
     }
     stbi_image_free(pixels);
     UploadTextureGPU(handle);

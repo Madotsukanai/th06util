@@ -363,6 +363,7 @@ bool SoundFontSynth::Open(const char *soundfontName)
         if (!HasEmbeddedSoundFont())
         {
             utils::DebugPrint2("SoundFontSynth: No soundfont found and embedded soundfont not available\n");
+            utils::LogDebug("SoundFontSynth::Open FAILED: no soundfont and no embedded font");
             return false;
         }
         strncpy(targetFile, EMBEDDED_SOUNDFONT_PATH, sizeof(targetFile) - 1);
@@ -371,6 +372,7 @@ bool SoundFontSynth::Open(const char *soundfontName)
     else if (targetFile[0] == '\0')
     {
         utils::DebugPrint2("SoundFontSynth: No soundfont found\n");
+        utils::LogDebug("SoundFontSynth::Open FAILED: no soundfont found (empty target)");
         return false;
     }
 
@@ -416,6 +418,7 @@ bool SoundFontSynth::Open(const char *soundfontName)
     if (s_sfontId == FLUID_FAILED)
     {
         utils::DebugPrint2("SoundFontSynth: Failed to load soundfont '%s'\n", targetFile);
+        utils::LogDebug("SoundFontSynth: sfload FAILED target=%s", targetFile);
         Close();
         return false;
     }
@@ -442,6 +445,7 @@ bool SoundFontSynth::Open(const char *soundfontName)
     if (mr != MMSYSERR_NOERROR)
     {
         utils::DebugPrint2("SoundFontSynth: waveOutOpen failed (%u)\n", mr);
+        utils::LogDebug("SoundFontSynth: waveOutOpen FAILED mr=0x%x", (unsigned)mr);
         Close();
         return false;
     }
@@ -467,6 +471,8 @@ bool SoundFontSynth::Open(const char *soundfontName)
 
     utils::DebugPrint2("SoundFontSynth: FluidSynth loaded '%s' (512-sample low-latency stream started)\n",
                        s_currentSoundFont);
+    utils::LogDebug("SoundFontSynth::Open OK: font='%s' sfId=%d targetFile=%s", s_currentSoundFont, s_sfontId,
+                    targetFile);
     return true;
 }
 

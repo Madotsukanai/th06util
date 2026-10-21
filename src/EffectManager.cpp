@@ -292,6 +292,23 @@ ChainCallbackResult EffectManager::OnDraw(EffectManager *mgr)
 
         effect->vm.pos = effect->pos1;
         g_AnmManager->Draw3(&effect->vm);
+        // TEMP diagnostics: during the boss-damage armed window, dump every
+        // live effect VM state so the blob colour/blend/sprite is directly
+        // attributable to a specific effect script.
+        {
+            extern int g_snifferFlashArmed; // vulkan_renderer.cpp
+            static int s_effDiag = 0;
+            if (g_snifferFlashArmed > 0 && s_effDiag < 2400)
+            {
+                s_effDiag++;
+                th06::utils::LogDebug(
+                    "EFFECT[%d] sp=%d vis=%d rot=%.3f scale=(%.2f,%.2f) color=0x%08x blend=%d pos=(%.1f,%.1f)",
+                    (int)effectIdx, (int)effect->vm.activeSpriteIndex,
+                    (int)((effect->vm.flags.flags & AnmVmFlags_Visible) != 0), (double)effect->vm.rotation.z,
+                    (double)effect->vm.scaleX, (double)effect->vm.scaleY, (u32)effect->vm.color,
+                    (int)(effect->vm.flags.blendMode), (double)effect->pos1.x, (double)effect->pos1.y);
+            }
+        }
     }
 
     return CHAIN_CALLBACK_RESULT_CONTINUE;

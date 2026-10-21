@@ -2,6 +2,7 @@
 
 #include "dummy_d3d8.hpp"
 #include "renderer.hpp"
+#include "../utils.hpp"
 #include <cstring>
 #include <map>
 #include <vector>
@@ -728,6 +729,22 @@ public:
         if (stage >= kMaxStages || static_cast<DWORD>(type) >= kMaxStageStates) return D3DERR_INVALIDCALL;
         stageStates_[stage][type] = v;
         if (stage == 0 && type == D3DTSS_COLOROP && (kForwardMask & kForwardColorOp) && g_Renderer) {
+            // DIAG(colorop): log every stage-0 COLOROP transition to verify when
+            // D3DTOP_ADD actually reaches the renderer during boss-hit flashes.
+            {
+                static DWORD s_dbgPrevOp = 0xffffffff;
+                static int s_dbgOpCount = 0;
+                if (s_dbgPrevOp != v && s_dbgOpCount < 400)
+                {
+                    s_dbgPrevOp = v;
+                    s_dbgOpCount++;
+                    const char *opName = "OTHER";
+                    if (v == D3DTOP_ADD) opName = "ADD";
+                    else if (v == D3DTOP_MODULATE) opName = "MODULATE";
+                    else if (v == D3DTOP_SELECTARG1) opName = "SELECTARG1";
+                    th06::utils::LogDebug("COLOROP stage0 -> %s (count=%d)", opName, s_dbgOpCount);
+                }
+            }
             g_Renderer->SetColorOpAdd(v == D3DTOP_ADD);
         }
         return S_OK;

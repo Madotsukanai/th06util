@@ -3613,6 +3613,33 @@ ZunResult MainMenu::LoadTitleAnm(MainMenu *menu)
         menu->vm[i].flags.zWriteDisable = 1;
     }
 
+    {
+        static bool s_optionLabelLogged = false;
+        if (!s_optionLabelLogged)
+        {
+            s_optionLabelLogged = true;
+            for (i = 72; i < 82; i++)
+            {
+                AnmVm *v = &menu->vm[i];
+                if (v->sprite == NULL)
+                {
+                    th06::utils::LogDebug("optionLabel vm[%d]: sprite==NULL base=%d", i, (int)v->baseSpriteIndex);
+                }
+                else
+                {
+                    th06::utils::LogDebug(
+                        "optionLabel vm[%d]: idx=%d srcFile=%d rect=(%.0f,%.0f)-(%.0f,%.0f) uv=(%.3f,%.3f)-(%.3f,%.3f) "
+                        "tw=%.0f th=%.0f",
+                        i, (int)v->baseSpriteIndex, (int)v->sprite->sourceFileIndex, (float)v->sprite->startPixelInclusive.x,
+                        (float)v->sprite->startPixelInclusive.y, (float)v->sprite->endPixelInclusive.x,
+                        (float)v->sprite->endPixelInclusive.y, (float)v->sprite->uvStart.x,
+                        (float)v->sprite->uvStart.y, (float)v->sprite->uvEnd.x, (float)v->sprite->uvEnd.y,
+                        (float)v->sprite->textureWidth, (float)v->sprite->textureHeight);
+                }
+            }
+        }
+    }
+
     if (g_AnmManager->LoadSurface(0, "data/title/title00.jpg"))
     {
         return ZUN_ERROR;

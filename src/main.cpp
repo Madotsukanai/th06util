@@ -169,8 +169,13 @@ restart:
     }
 
     th06::utils::LogDebug("WinMain: Initializing DSound");
-    g_SoundPlayer.InitializeDSound(g_GameWindow.window);
-    th06::utils::LogDebug("WinMain: DSound Initialized");
+    ZunResult dsoundInitRes = g_SoundPlayer.InitializeDSound(g_GameWindow.window);
+    th06::utils::LogDebug("WinMain: DSound Initialized (result=%d manager=%p)", dsoundInitRes,
+                          (LPVOID)g_SoundPlayer.manager);
+    if (dsoundInitRes != ZUN_SUCCESS)
+    {
+        th06::utils::LogDebug("WinMain: DSound init FAILED - SE and WAV BGM will be silent");
+    }
     Controller::GetJoystickCaps();
     Controller::ResetKeyboard();
     Supervisor::ResetInputState();

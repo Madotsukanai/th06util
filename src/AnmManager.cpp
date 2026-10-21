@@ -175,6 +175,7 @@ ZunResult AnmManager::LoadTexture(i32 textureIdx, char *textureName, i32 texture
     // for textures whose sprites reach the texture border.
 #ifdef USE_VULKAN
     {
+        th06::utils::LogDebug("ANMTEX idx=%d name=%s fmt=%d", (int)textureIdx, textureName ? textureName : "?", (int)textureFormat);
         TextureHandle handle =
             g_Renderer->CreateTextureFromMemory(this->imageDataArray[textureIdx], g_LastFileSize, colorKey, this->loadTextureClampToEdge);
         this->textures[textureIdx] = (IDirect3DTexture8 *)(uintptr_t)handle;
@@ -498,6 +499,7 @@ ZunResult AnmManager::LoadAnm(i32 anmIdx, const char *path, i32 spriteIdxOffset)
     // - unless any script scrolls UVs, which needs REPEAT.
     {
         bool anySpriteTouchesBorder = false;
+        bool anySpriteNeedsWrap = false;
         u32 *sprOff = anm->spriteOffsets;
         for (i32 s = 0; s < anm->numSprites; s++, sprOff++)
         {
@@ -506,13 +508,27 @@ ZunResult AnmManager::LoadAnm(i32 anmIdx, const char *path, i32 spriteIdxOffset)
             f32 y0 = rawSprite->offset.y;
             f32 x1 = x0 + rawSprite->size.x;
             f32 y1 = y0 + rawSprite->size.y;
-            if (x0 <= 0.0f || x1 >= (f32)anm->width || y0 <= 0.0f || y1 >= (f32)anm->height)
+            if (x0 <= 0.0f || y0 <= 0.0f)
+            {
+                anySpriteTouchesBorder = true;
+            }
+            if (x1 > (f32)anm->width + 0.25f || y1 > (f32)anm->height + 0.25f)
+            {
+                // Sprites that extend beyond the texture dimensions RELY on
+                // wrapping: TH06's option screen (title04.anm) defines label
+                // sprites wider than the 256x256 texture and duplicates the
+                // left-hand label art through the REPEAT sampler. Clamping
+                // those stays stuck at uv>=1.0 and renders garbage, so wrap
+                // mode must be preserved for such sprites.
+                anySpriteNeedsWrap = true;
+            }
+            else if (x1 >= (f32)anm->width || y1 >= (f32)anm->height)
             {
                 anySpriteTouchesBorder = true;
             }
         }
         this->loadTextureClampToEdge = false;
-        if (anySpriteTouchesBorder && !this->AnmUsesUvScroll(anm))
+        if (anySpriteTouchesBorder && !anySpriteNeedsWrap && !this->AnmUsesUvScroll(anm))
         {
             this->loadTextureClampToEdge = true;
         }
@@ -613,6 +629,11 @@ void AnmManager::BuildSpriteDecoys(i32 anmIdx)
     if (!g_Renderer->LockTexture(tex, &desc))
     {
         return;
+    }
+
+    {
+        th06::utils::LogDebug("BuildSpriteDecoys: anmIdx=%d anm w=%f h=%f desc=%ux%u", (int)anmIdx, (double)anm->width,
+                              (double)anm->height, (u32)desc.width, (u32)desc.height);
     }
 
     u8 *px = (u8 *)desc.pixels;
@@ -1178,13 +1199,40 @@ ZunResult AnmManager::DrawInner(AnmVm *vm, i32 param_3)
     }
     BlendMode blend = (vm->flags.blendMode == AnmVmBlendMode_InvSrcAlpha) ? BLEND_ALPHA : BLEND_ADD;
     TextureHandle tex = (TextureHandle)(uintptr_t)this->textures[vm->sprite->sourceFileIndex];
+    // The Vulkan path bypasses the D3D8 draw calls, so forward the per-VM
+    // fixed-function state (colour op D3DTOP_ADD/MODULATE, z-write) that
+    // SetRenderStateForVm applies in the D3D8 path. Without this, effects
+    // whose scripts request AnmVmColorOp_Add (boss-hit flashes, invulnerability
+    // blink, lasers, ...) render modulated and their colours change.
+    this->SetRenderStateForVm(vm);
+    g_Renderer->DrawQuad2D(tex, v2d, blend);
     {
-        ptrdiff_t spi = vm->sprite - this->sprites;
-        if (spi >= 108 && spi <= 118)
+        // TEMP diagnostics: log 2D draws for player/bullet3/bullet4/effects
+        // textures (the un-rotated path bullets and player sprites take).
+        static u32 s_drawInnerDiagCount = 0;
+        i32 srcIdx = vm->sprite->sourceFileIndex;
+        if ((srcIdx == 7 || srcIdx == 11 || srcIdx == 8 || srcIdx == 9) && s_drawInnerDiagCount < 1800)
         {
+            s_drawInnerDiagCount++;
+            th06::utils::LogDebug(
+                "drawIn tex=%d spi=%d rect=(%.0f,%.0f)-(%.0f,%.0f) blend=%d color=0x%08x pos=(%.1f,%.1f)",
+                (int)srcIdx, (int)(vm->sprite - this->sprites),
+                (double)vm->sprite->startPixelInclusive.x, (double)vm->sprite->startPixelInclusive.y,
+                (double)vm->sprite->endPixelInclusive.x, (double)vm->sprite->endPixelInclusive.y,
+                (int)blend, (u32)vm->color, (double)vm->pos.x, (double)vm->pos.y);
+        }
+
+        {
+            // TEMP diagnostics: sniff RGB-zero quads on ALL textures/blends.
+            static u32 s_blackQuadDiag = 0;
+            if (s_blackQuadDiag < 400 && (vm->color & 0x00ffffff) == 0)
+            {
+                s_blackQuadDiag++;
+                th06::utils::LogDebug("BLACKQUAD path=drawInner tex=%d spi=%d color=0x%08x blend=%d", (int)srcIdx,
+                                      (int)(vm->sprite - this->sprites), (u32)vm->color, (int)blend);
+            }
         }
     }
-    g_Renderer->DrawQuad2D(tex, v2d, blend);
     return ZUN_SUCCESS;
 #else
     this->SetRenderStateForVm(vm);
@@ -1480,6 +1528,49 @@ ZunResult AnmManager::Draw3(AnmVm *vm)
 
     BlendMode blend = (vm->flags.blendMode == AnmVmBlendMode_InvSrcAlpha) ? BLEND_ALPHA : BLEND_ADD;
     TextureHandle tex = (TextureHandle)(uintptr_t)this->textures[vm->sprite->sourceFileIndex];
+    {
+        // TEMP diagnostics: log hit-effect draws so the "hit spark renders
+        // black" report can be correlated with anm parameters (tex 5/6/7/11
+        // = player/bullet3/bullet4/effects).
+        static u32 s_draw3DiagCount, s_draw3DiagCount3D711, s_draw3DiagCount3D89, s_draw3DiagCount3D4 = 0;
+        i32 srcIdx = vm->sprite->sourceFileIndex;
+        extern int g_snifferFlashArmed; // vulkan_renderer.cpp: >0 during boss-damage frames
+        bool armedDiag = g_snifferFlashArmed > 0;
+        if (armedDiag || ((srcIdx == 7 || srcIdx == 11) && s_draw3DiagCount3D711 < 800) ||
+            ((srcIdx == 8 || srcIdx == 9) && s_draw3DiagCount3D89 < 800) ||
+            (srcIdx == 4 && s_draw3DiagCount3D4 < 1600))
+        {
+            if (!armedDiag)
+            {
+                if (srcIdx == 4) s_draw3DiagCount3D4++; else if (srcIdx == 8 || srcIdx == 9) s_draw3DiagCount3D89++; else s_draw3DiagCount3D711++;
+            }
+            th06::utils::LogDebug(
+                "draw3 tex=%d spi=%d rect=(%.0f,%.0f)-(%.0f,%.0f) uv=(%.3f,%.3f)-(%.3f,%.3f) blend=%d color=0x%08x pos=(%.1f,%.1f) scale=(%.2f,%.2f)",
+                (int)srcIdx, (int)(vm->sprite - this->sprites), (double)vm->sprite->startPixelInclusive.x,
+                (double)vm->sprite->startPixelInclusive.y, (double)vm->sprite->endPixelInclusive.x,
+                (double)vm->sprite->endPixelInclusive.y, (double)vm->sprite->uvStart.x,
+                (double)vm->sprite->uvStart.y, (double)vm->sprite->uvEnd.x, (double)vm->sprite->uvEnd.y,
+                (int)blend, (u32)vm->color, (double)vm->pos.x, (double)vm->pos.y, (double)vm->scaleX,
+                (double)vm->scaleY);
+        }
+
+        {
+            // TEMP diagnostics: a quad drawn with RGB zero renders dark
+            // (alpha blend) or invisible (additive) - sniff ALL textures and
+            // blends now that the black layer was identified as the fog/cloud
+            // sprites drawn over the stage-1 sky.
+            static u32 s_blackQuadDiag = 0;
+            if (s_blackQuadDiag < 400 && (vm->color & 0x00ffffff) == 0)
+            {
+                s_blackQuadDiag++;
+                th06::utils::LogDebug("BLACKQUAD path=draw3 tex=%d spi=%d color=0x%08x blend=%d", (int)srcIdx,
+                                      (int)(vm->sprite - this->sprites), (u32)vm->color, (int)blend);
+            }
+        }
+    }
+    // Forward the per-VM fixed-function state (colour op, z-write) exactly like
+    // the D3D8 path does before its draw call; see DrawInner for details.
+    this->SetRenderStateForVm(vm);
     g_Renderer->DrawQuad3D((const float*)&worldTransformMatrix, tex, v3d, blend);
     return ZUN_SUCCESS;
 #else
@@ -1573,6 +1664,40 @@ ZunResult AnmManager::Draw2(AnmVm *vm)
 
     BlendMode blend = (vm->flags.blendMode == AnmVmBlendMode_InvSrcAlpha) ? BLEND_ALPHA : BLEND_ADD;
     TextureHandle tex = (TextureHandle)(uintptr_t)this->textures[vm->sprite->sourceFileIndex];
+    {
+        // TEMP diagnostics: shot 2D draws with etama/player textures (this is
+        // the path bullets take; gameSo playerShot->hit sparks come through
+        // Draw2 -> DrawQuad3D).
+        static u32 s_draw2DiagCount = 0;
+        i32 srcIdx = vm->sprite->sourceFileIndex;
+        if (((srcIdx == 7 || srcIdx == 11) && s_draw2DiagCount < 1200) ||
+            ((srcIdx == 8 || srcIdx == 9) && s_draw2DiagCount < 2400))
+        {
+            s_draw2DiagCount++;
+            th06::utils::LogDebug(
+                "draw2 tex=%d spi=%d rect=(%.0f,%.0f)-(%.0f,%.0f) uv=(%.3f,%.3f)-(%.3f,%.3f) blend=%d color=0x%08x pos=(%.1f,%.1f) scale=(%.2f,%.2f)",
+                (int)srcIdx, (int)(vm->sprite - this->sprites), (double)vm->sprite->startPixelInclusive.x,
+                (double)vm->sprite->startPixelInclusive.y, (double)vm->sprite->endPixelInclusive.x,
+                (double)vm->sprite->endPixelInclusive.y, (double)vm->sprite->uvStart.x,
+                (double)vm->sprite->uvStart.y, (double)vm->sprite->uvEnd.x, (double)vm->sprite->uvEnd.y,
+                (int)blend, (u32)vm->color, (double)vm->pos.x, (double)vm->pos.y, (double)vm->scaleX,
+                (double)vm->scaleY);
+        }
+
+        {
+            // TEMP diagnostics: sniff RGB-zero quads on ALL textures/blends.
+            static u32 s_blackQuadDiag = 0;
+            if (s_blackQuadDiag < 400 && (vm->color & 0x00ffffff) == 0)
+            {
+                s_blackQuadDiag++;
+                th06::utils::LogDebug("BLACKQUAD path=draw2 tex=%d spi=%d color=0x%08x blend=%d", (int)srcIdx,
+                                      (int)(vm->sprite - this->sprites), (u32)vm->color, (int)blend);
+            }
+        }
+    }
+    // Forward the per-VM fixed-function state (colour op, z-write) exactly like
+    // the D3D8 path does before its draw call; see DrawInner for details.
+    this->SetRenderStateForVm(vm);
     g_Renderer->DrawQuad3D((const float*)&worldTransformMatrix, tex, v3d, blend);
     return ZUN_SUCCESS;
 #else

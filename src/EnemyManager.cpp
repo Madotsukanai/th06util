@@ -1732,6 +1732,9 @@ ChainCallbackResult EnemyManager::OnUpdate(EnemyManager *mgr)
                 curEnemy->primaryVm.flags.colorOp = AnmVmColorOp_Add;
 
                 curEnemy->unk_e41 = 1;
+                // DIAG(sniff): arm the frame-sniffer window on boss damage.
+                extern int g_snifferFlashArmed;
+                g_snifferFlashArmed = 30;
             }
             else
             {
@@ -2150,11 +2153,34 @@ static void DrawBossHpCircle(Enemy *boss)
             {
                 float theta = ZUN_PI / 2.0f + T * total_arc;
                 float epsilon = 0.005f * ZUN_PI;
-                D3DCOLOR tickColor = D3DCOLOR_ARGB(0xFF, 0x30, 0xD0, 0xFF);
+                // DIAG(tickcolor): temporarily magenta. The sniff found the only
+                // teal quads on screen are these HP-threshold ticks (0xff30d0ff);
+                // if the boss-hit blobs turn magenta on film, the ticks are the
+                // blob source and the bug is in how they are drawn. Revert to
+                // D3DCOLOR_ARGB(0xFF, 0x30, 0xD0, 0xFF) after the experiment.
+                D3DCOLOR tickColor = D3DCOLOR_ARGB(0xFF, 0xFF, 0x30, 0xFF);
                 DrawRing(54.0f, 62.0f, theta - epsilon, theta + epsilon, tickColor);
             }
         }
-    }
+        // DIAG(tickcolor): log the threshold list once per change so the tick
+        // count can be compared with the blob count in the screenshot.
+        {
+            static u32 s_TickListLogCount = 0;
+            if (s_TickListLogCount < 120)
+            {
+                char ts[128];
+                int off = 0;
+                for (int i = 0; i < s_SpellcardLifeThresholdsCount && off < (int)sizeof(ts) - 16; i++)
+                {
+                    off += sprintf(ts + off, "%d,", (int)s_SpellcardLifeThresholds[i]);
+                }
+                th06::utils::LogDebug("THRESH n=%d spell=%d maxLife=%d life=%d Tlist=[%s]",
+                                      (int)s_SpellcardLifeThresholdsCount, (int)g_EnemyManager.spellcardInfo.idx,
+                                      (int)boss->maxLife, (int)boss->life, ts);
+                s_TickListLogCount++;
+            }
+        }
+    } // if (pct > 0.0f)
 
     g_Supervisor.d3dDevice->SetTransform(D3DTS_WORLD, &origWorld);
     g_Supervisor.d3dDevice->SetRenderState(D3DRS_ZWRITEENABLE, oldZWrite);

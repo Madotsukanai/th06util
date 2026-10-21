@@ -61,6 +61,13 @@ struct PushConstants3D {
     float fogDist[2]; // x=near, y=far
     float fogEnable;
     float colorOpAdd;
+    // D3D8 texel-center origin convention: identical to sprite.frag. The 3D
+    // stage quads (Draw3) sample the same anm textures and need the same
+    // (0.5/width, 0.5/height) correction; without it every Draw3 quad samples
+    // halfway between two texels and blends in the neighbouring texel row
+    // (visible as dark-edge/blur corruption on the hit sparks, stage sprites).
+    float halfTexelU;
+    float halfTexelV;
 };
 
 struct FrameResource {

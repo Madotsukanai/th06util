@@ -1,5 +1,6 @@
 #include "Supervisor.hpp"
 #include "AnmManager.hpp"
+#include "utils.hpp"
 #include "AsciiManager.hpp"
 #include "Chain.hpp"
 #include "ChainPriorities.hpp"
@@ -1405,6 +1406,12 @@ ZunResult Supervisor::LoadConfig(char *path)
 
     memset(&g_Supervisor.cfg, 0, sizeof(GameConfiguration));
     g_Supervisor.cfg.opts = g_Supervisor.cfg.opts | (1 << GCOS_USE_D3D_HW_TEXTURE_BLENDING);
+    // DIAG(colorop): dump the option bits that gate the vanilla D3DTOP_ADD path
+    // (AnmManager.cpp only switches the stage-0 colour op to ADD when both
+    // GCOS_USE_D3D_HW_TEXTURE_BLENDING and GCOS_NO_COLOR_COMP are unset).
+    th06::utils::LogDebug("CFG opts=0x%x hwblend=%d nocomp=%d", (u32)g_Supervisor.cfg.opts,
+                          (i32)((g_Supervisor.cfg.opts >> GCOS_USE_D3D_HW_TEXTURE_BLENDING) & 1),
+                          (i32)((g_Supervisor.cfg.opts >> GCOS_NO_COLOR_COMP) & 1));
     data = (GameConfiguration *)FileSystem::OpenPath(path, 1);
     if (data == NULL)
     {
@@ -1702,6 +1709,10 @@ ZunResult Supervisor::PlayAudio(char *path)
     char *pathExtension;
 
     i32 mode = Supervisor::ResolveMusicMode(path);
+    i32 trackNo = ParseBgmTrackNo(path);
+    th06::utils::LogDebug("PlayAudio: path=%s mode=%d cfgMode=%d override=%d track=%d trackMode=%d", path, mode,
+                          (int)g_Supervisor.cfg.musicMode, s_musicModeOverride, trackNo,
+                          (trackNo >= 0 && trackNo < BGM_TRACK_COUNT) ? (int)g_BgmTrackMode[trackNo] : -1);
 
     if (mode == MIDI)
     {
@@ -1716,6 +1727,8 @@ ZunResult Supervisor::PlayAudio(char *path)
             midiOutput->LoadFile(path);
             midiOutput->Play();
             s_activeMusicMode = MIDI;
+            th06::utils::LogDebug("PlayAudio: MIDI playback started (synthType=%d sf=%s)", (int)g_MidiSynthType,
+                                  g_MidiSoundFont[0] ? g_MidiSoundFont : "(empty=embedded)");
         }
     }
     else if (mode == WAV)
@@ -1735,8 +1748,10 @@ ZunResult Supervisor::PlayAudio(char *path)
         pathExtension[1] = 'p';
         pathExtension[2] = 'o';
         pathExtension[3] = 's';
-        g_SoundPlayer.LoadWav(wavName);
-        if (g_SoundPlayer.LoadPos(wavPos) < ZUN_SUCCESS)
+        ZunResult wavLoadRes = g_SoundPlayer.LoadWav(wavName);
+        ZunResult posLoadRes = g_SoundPlayer.LoadPos(wavPos);
+        th06::utils::LogDebug("PlayAudio: WAV branch LoadWav=%d LoadPos=%d", (int)wavLoadRes, (int)posLoadRes);
+        if (posLoadRes < ZUN_SUCCESS)
         {
             g_SoundPlayer.PlayBGM(FALSE);
         }

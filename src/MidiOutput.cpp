@@ -313,9 +313,11 @@ ZunResult MidiOutput::ReadFileData(u32 idx, char *path)
 
     if (this->midiFileData[idx] == (byte *)0x0)
     {
+        th06::utils::LogDebug("MidiOutput::ReadFileData: OpenPath FAILED path=%s (BGM falls silent)", path);
         g_GameErrorContext.Log(TH_ERR_MIDI_FAILED_TO_READ_FILE, path);
         return ZUN_ERROR;
     }
+    th06::utils::LogDebug("MidiOutput::ReadFileData: opened path=%s", path);
 
     return ZUN_SUCCESS;
 }
@@ -433,11 +435,13 @@ ZunResult MidiOutput::Play()
 {
     if (this->tracks == NULL)
     {
+        th06::utils::LogDebug("MidiOutput::Play: no tracks parsed (BGM falls silent)");
         return ZUN_ERROR;
     }
 
     this->LoadTracks();
-    this->midiOutDev.OpenDevice(0xFFFFFFFF);
+    ZunBool openErr = this->midiOutDev.OpenDevice(0xFFFFFFFF);
+    th06::utils::LogDebug("MidiOutput::Play: OpenDevice error=%d synthType=%d", (int)openErr, (int)g_MidiSynthType);
     this->StartTimer(1, NULL, NULL);
 
     return ZUN_SUCCESS;
