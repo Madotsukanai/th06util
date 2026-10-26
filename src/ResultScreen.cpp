@@ -706,13 +706,20 @@ static void ReturnToStatsScreen(ResultScreen *rs, bool playSound)
     }
     strcpy(rs->replayName, rs->hscr.name);
 
-    i32 actualDeaths = g_GameManager.deaths - g_DeathbombCount;
-    if (actualDeaths < 0)
+    if (g_ShowActualDeaths)
     {
-        actualDeaths = 0;
+        i32 actualDeaths = g_GameManager.deaths - g_DeathbombCount;
+        if (actualDeaths < 0)
+        {
+            actualDeaths = 0;
+        }
+        AnmManager::DrawVmTextFmt(g_AnmManager, &rs->unk_28a0[15], COLOR_RGB(COLOR_RED), COLOR_RGB(COLOR_BLACK),
+                                  TH_STATS_ACTUAL_DEATHS_FMT, actualDeaths);
     }
-    AnmManager::DrawVmTextFmt(g_AnmManager, &rs->unk_28a0[15], COLOR_RGB(COLOR_WHITE), COLOR_RGB(COLOR_BLACK),
-                              TH_STATS_ACTUAL_DEATHS_FMT, actualDeaths);
+    else
+    {
+        AnmManager::DrawVmTextFmt(g_AnmManager, &rs->unk_28a0[15], COLOR_RGB(COLOR_RED), COLOR_RGB(COLOR_BLACK), "");
+    }
 }
 
 i32 ResultScreen::HandleResultKeyboard()
@@ -1339,7 +1346,10 @@ u32 ResultScreen::DrawFinalStats()
         this->unk_28a0[15].pos.x += 130.0f;
         this->unk_28a0[15].pos.y += 1.0f;
         this->unk_28a0[15].color = color;
-        g_AnmManager->DrawNoRotation(&this->unk_28a0[15]);
+        if (g_ShowActualDeaths)
+        {
+            g_AnmManager->DrawNoRotation(&this->unk_28a0[15]);
+        }
 
         unknownFloat -= g_GameManager.deaths * 5.0f - 10.0f;
 
@@ -1818,13 +1828,21 @@ ChainCallbackResult ResultScreen::OnUpdate(ResultScreen *resultScreen)
     case RESULT_SCREEN_STATE_STATS_SCREEN:
         if (resultScreen->frameTimer == 0)
         {
-            i32 actualDeaths = g_GameManager.deaths - g_DeathbombCount;
-            if (actualDeaths < 0)
+            if (g_ShowActualDeaths)
             {
-                actualDeaths = 0;
+                i32 actualDeaths = g_GameManager.deaths - g_DeathbombCount;
+                if (actualDeaths < 0)
+                {
+                    actualDeaths = 0;
+                }
+                AnmManager::DrawVmTextFmt(g_AnmManager, &resultScreen->unk_28a0[15], COLOR_RGB(COLOR_RED),
+                                          COLOR_RGB(COLOR_BLACK), TH_STATS_ACTUAL_DEATHS_FMT, actualDeaths);
             }
-            AnmManager::DrawVmTextFmt(g_AnmManager, &resultScreen->unk_28a0[15], COLOR_RGB(COLOR_WHITE),
-                                      COLOR_RGB(COLOR_BLACK), TH_STATS_ACTUAL_DEATHS_FMT, actualDeaths);
+            else
+            {
+                AnmManager::DrawVmTextFmt(g_AnmManager, &resultScreen->unk_28a0[15], COLOR_RGB(COLOR_RED),
+                                          COLOR_RGB(COLOR_BLACK), "");
+            }
         }
     case RESULT_SCREEN_STATE_STATS_TO_SAVE_TRANSITION:
         resultScreen->CheckConfirmButton();

@@ -274,6 +274,7 @@ extern i32 g_BossHpCircle;
 extern i32 g_ShowEnemyMarker;
 extern i32 g_ShowDifficultyLabel;
 extern i32 g_ShowFrameCounter;
+extern i32 g_ShowActualDeaths;
 extern u16 g_NetRandomSeed;
 extern u16 g_NumOfFramesInputsWereHeld;
 extern u32 g_InputDelay;

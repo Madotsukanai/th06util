@@ -75,6 +75,7 @@ i32 g_BossHpCircle;
 i32 g_ShowEnemyMarker;
 i32 g_ShowDifficultyLabel;
 i32 g_ShowFrameCounter;
+i32 g_ShowActualDeaths;
 i32 g_VerticalMode;
 i32 g_P2BombsRemaining;
 i32 g_P2GrazeInStage;
@@ -1308,6 +1309,7 @@ ZunResult Supervisor::LoadConfig(char *path)
         g_ShowEnemyMarker = GetPrivateProfileIntA("display", "enemy_marker", 0, _ini);
         g_ShowDifficultyLabel = GetPrivateProfileIntA("display", "show_difficulty", 0, _ini);
         g_ShowFrameCounter = GetPrivateProfileIntA("display", "show_frame_counter", 0, _ini);
+        g_ShowActualDeaths = GetPrivateProfileIntA("display", "show_actual_deaths", 1, _ini);
 
         if (GetPrivateProfileIntA("audio", "bgm_volume", -1, _ini) == -1)
         {

@@ -80,6 +80,7 @@ static Item *GetDisplayItems(i32 *count)
         {L"エネミーマーカー", "display", "enemy_marker", &g_ShowEnemyMarker, KIND_TOGGLE, false, 0, true},
         {L"難易度表示", "display", "show_difficulty", &g_ShowDifficultyLabel, KIND_TOGGLE, false, 0, false},
         {L"経過フレーム数表示", "display", "show_frame_counter", &g_ShowFrameCounter, KIND_TOGGLE, false, 0, false},
+        {L"実ミス数表示", "display", "show_actual_deaths", &g_ShowActualDeaths, KIND_TOGGLE, false, 0, false},
         {L"垂直同期*", "display", "vsync", &g_Vsync, KIND_TOGGLE, true, 0, false},
         {L"縦画面モード*", "display", "vertical_mode", &g_VerticalMode, KIND_ROTATION, true, 0, false},
     };
