@@ -9,6 +9,7 @@
 #include "MidiOutput.hpp"
 #include "ZunBool.hpp"
 #include "ZunResult.hpp"
+#include <cstddef>
 #include "diffbuild.hpp"
 #include "inttypes.hpp"
 #include "pbg3/Pbg3Archive.hpp"
@@ -59,6 +60,9 @@ struct GameConfiguration
 {
     ControllerMapping controllerMapping;
 
+    u16 configLayoutPad; // 0xDDDD filler in the original file layout; version
+                         // dword lives at offset 0x14, matching Supervisor::LoadConfig.
+
     i32 version;
     u8 lifeCount;
     u8 bombCount;
@@ -71,7 +75,7 @@ struct GameConfiguration
     u8 frameskipConfig;
     i16 padXAxis;
     i16 padYAxis;
-    i8 unk[16];
+    u8 unk[16];
 
     u32 opts;
 
@@ -81,6 +85,10 @@ struct GameConfiguration
                ((this->opts >> GCOS_USE_D3D_HW_TEXTURE_BLENDING) & 1);
     }
 };
+
+static_assert(sizeof(GameConfiguration) == 0x38, "config layout drift");
+static_assert(offsetof(GameConfiguration, version) == 0x14, "config layout drift");
+static_assert(offsetof(GameConfiguration, opts) == 0x34, "config layout drift");
 
 #define IN_PBG3_INDEX 0
 #define MD_PBG3_INDEX 1

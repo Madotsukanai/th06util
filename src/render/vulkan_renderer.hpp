@@ -144,8 +144,9 @@ private:
     bool InitVulkan();
     bool CreateSwapchain();
     bool CreateRenderPass();
+    bool CreateOffscreenTarget();
     bool CreateDepthBuffer();
-    bool CreateFramebuffers();
+    void DestroyOffscreenTarget();
     bool CreateDescriptorPool();
     bool CreatePipelines();
     bool CreateFrameResources();
@@ -154,9 +155,9 @@ private:
     void UpdateDestRect();
     void ReleaseStaging();
     bool EnsureStaging(VkDeviceSize bytes);
-    // Copies a rect of the current swapchain image into the staging buffer
-    // (mapped as ARGB in stagingMapped_) and returns true on success.
-    bool CopySwapchainRegion(int ix0, int iy0, int iw, int ih, VkDeviceSize* outSize);
+    // Copies a rect of the persistent offscreen colour image into the staging
+    // buffer (mapped as ARGB in stagingMapped_) and returns true on success.
+    bool CopyOffscreenRegion(int ix0, int iy0, int iw, int ih, VkDeviceSize* outSize);
 
     void FlushBatch2D();
     // Applies the letter-boxed game viewport (or the current game viewport
@@ -184,7 +185,15 @@ private:
     VkExtent2D swapchainExtent_{ 640, 480 };
     std::vector<VkImage> swapchainImages_;
     std::vector<VkImageView> swapchainImageViews_;
-    std::vector<VkFramebuffer> framebuffers_;
+    // Persistent offscreen colour target the whole scene renders into
+    // (th06-sdl2 Fix-17 model): contents survive across frames, Present()
+    // blits it onto the acquired swapchain image, and capture/pause-bg
+    // readback reads this image instead of a driver-ordered swapchain back
+    // buffer. Destroyed/recreated together with the swapchain.
+    VkImage offscreenColorImage_ = VK_NULL_HANDLE;
+    VkDeviceMemory offscreenColorMemory_ = VK_NULL_HANDLE;
+    VkImageView offscreenColorView_ = VK_NULL_HANDLE;
+    VkFramebuffer offscreenFramebuffer_ = VK_NULL_HANDLE;
     bool swapchainDirty_ = false;
 
     // The 640x480 game image is letter-boxed (aspect preserved) into the swapchain.

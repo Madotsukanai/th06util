@@ -72,6 +72,7 @@ VK_FUNC(vkCmdDraw)
 VK_FUNC(vkCmdPushConstants)
 VK_FUNC(vkCmdCopyBufferToImage)
 VK_FUNC(vkCmdCopyImageToBuffer)
+VK_FUNC(vkCmdCopyImage)
 VK_FUNC(vkCmdPipelineBarrier)
 VK_FUNC(vkCreateBuffer)
 VK_FUNC(vkDestroyBuffer)
@@ -157,6 +158,7 @@ VK_FUNC(vkDeviceWaitIdle)
 #define vkCmdPushConstants pvkCmdPushConstants
 #define vkCmdCopyBufferToImage pvkCmdCopyBufferToImage
 #define vkCmdCopyImageToBuffer pvkCmdCopyImageToBuffer
+#define vkCmdCopyImage pvkCmdCopyImage
 #define vkCmdPipelineBarrier pvkCmdPipelineBarrier
 #define vkCreateBuffer pvkCreateBuffer
 #define vkDestroyBuffer pvkDestroyBuffer
@@ -261,6 +263,7 @@ static bool LoadVulkanSymbols(VkInstance instance = VK_NULL_HANDLE, VkDevice dev
     LOAD_D(vkCmdPushConstants);
     LOAD_D(vkCmdCopyBufferToImage);
     LOAD_D(vkCmdCopyImageToBuffer);
+    LOAD_D(vkCmdCopyImage);
     LOAD_D(vkCmdPipelineBarrier);
     LOAD_D(vkCreateBuffer);
     LOAD_D(vkDestroyBuffer);
@@ -325,7 +328,7 @@ bool VulkanRenderer::Initialize(void* windowHandle, int width, int height, bool 
     if (!CreateSwapchain()) return false;
     if (!CreateDepthBuffer()) return false;
     if (!CreateRenderPass()) return false;
-    if (!CreateFramebuffers()) return false;
+    if (!CreateOffscreenTarget()) return false;
     if (!CreateDescriptorPool()) return false;
     if (!CreatePipelines()) return false;
     if (!CreateFrameResources()) return false;
@@ -513,7 +516,9 @@ bool VulkanRenderer::CreateSwapchain() {
     sci.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     sci.imageExtent = swapchainExtent_;
     sci.imageArrayLayers = 1;
-    sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    // Swapchain images are only blit destinations now: the whole scene renders
+    // into the persistent offscreen target and Present() copies it over.
+    sci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
     uint32_t queueFamilyIndices[] = { graphicsQueueFamily_, presentQueueFamily_ };
     if (graphicsQueueFamily_ != presentQueueFamily_) {
@@ -603,8 +608,11 @@ bool VulkanRenderer::CreateRenderPass() {
     colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    // The colour target is the persistent offscreen image (not the swapchain):
+    // it always lives in COLOR_ATTACHMENT_OPTIMAL between passes, and Present()
+    // transitions it to/from TRANSFER_SRC around the copy onto the swapchain.
+    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     VkAttachmentDescription depthAttachment{};
     depthAttachment.format = depthFormat_;
@@ -657,22 +665,132 @@ bool VulkanRenderer::CreateRenderPass() {
     return true;
 }
 
-bool VulkanRenderer::CreateFramebuffers() {
-    framebuffers_.resize(swapchainImageViews_.size());
-    for (size_t i = 0; i < swapchainImageViews_.size(); i++) {
-        std::array<VkImageView, 2> attachments = { swapchainImageViews_[i], depthImageView_ };
-        VkFramebufferCreateInfo fbci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-        fbci.renderPass = renderPass_;
-        fbci.attachmentCount = static_cast<uint32_t>(attachments.size());
-        fbci.pAttachments = attachments.data();
-        fbci.width = swapchainExtent_.width;
-        fbci.height = swapchainExtent_.height;
-        fbci.layers = 1;
-        if (vkCreateFramebuffer(device_, &fbci, nullptr, &framebuffers_[i]) != VK_SUCCESS) {
-            return false;
-        }
+bool VulkanRenderer::CreateOffscreenTarget() {
+    // Persistent offscreen colour target (th06-sdl2 VkRenderTarget model).
+    // th06 frames are always fully redrawn, but several things rely on the
+    // *previous* frame being readable as-is:
+    //   - the pause-menu background capture, run between frames,
+    //   - the launcher/present-time screenshots,
+    //   - anything that assumes a classic D3D8 flip-chain backbuffer that
+    //     keeps its contents until the next Present.
+    // Rendering straight into the swapchain makes all of those depend on which
+    // image vkAcquireNextImageKHR happens to hand out, so the scene instead
+    // targets one stable image and Present() copies it onto the swapchain.
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.extent.width = swapchainExtent_.width;
+    ici.extent.height = swapchainExtent_.height;
+    ici.extent.depth = 1;
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.format = swapchainFormat_;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateImage(device_, &ici, nullptr, &offscreenColorImage_) != VK_SUCCESS) {
+        fprintf(stderr, "[Vulkan] offscreen colour image creation failed\n");
+        return false;
     }
+
+    VkMemoryRequirements memReq;
+    vkGetImageMemoryRequirements(device_, offscreenColorImage_, &memReq);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize = memReq.size;
+    mai.memoryTypeIndex = FindMemoryType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(device_, &mai, nullptr, &offscreenColorMemory_) != VK_SUCCESS) {
+        fprintf(stderr, "[Vulkan] offscreen colour memory allocation failed\n");
+        DestroyOffscreenTarget();
+        return false;
+    }
+    vkBindImageMemory(device_, offscreenColorImage_, offscreenColorMemory_, 0);
+
+    VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    ivci.image = offscreenColorImage_;
+    ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format = swapchainFormat_;
+    ivci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    ivci.subresourceRange.baseMipLevel = 0;
+    ivci.subresourceRange.levelCount = 1;
+    ivci.subresourceRange.baseArrayLayer = 0;
+    ivci.subresourceRange.layerCount = 1;
+    if (vkCreateImageView(device_, &ivci, nullptr, &offscreenColorView_) != VK_SUCCESS) {
+        fprintf(stderr, "[Vulkan] offscreen colour view creation failed\n");
+        DestroyOffscreenTarget();
+        return false;
+    }
+
+    std::array<VkImageView, 2> attachments = { offscreenColorView_, depthImageView_ };
+    VkFramebufferCreateInfo fbci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+    fbci.renderPass = renderPass_;
+    fbci.attachmentCount = static_cast<uint32_t>(attachments.size());
+    fbci.pAttachments = attachments.data();
+    fbci.width = swapchainExtent_.width;
+    fbci.height = swapchainExtent_.height;
+    fbci.layers = 1;
+    if (vkCreateFramebuffer(device_, &fbci, nullptr, &offscreenFramebuffer_) != VK_SUCCESS) {
+        fprintf(stderr, "[Vulkan] offscreen framebuffer creation failed\n");
+        DestroyOffscreenTarget();
+        return false;
+    }
+
+    // The render passes declare COLOR_ATTACHMENT_OPTIMAL as the attachment's
+    // initial layout, so move the freshly-created image there once. No clear:
+    // every pass uses LOAD_OP_CLEAR for colour.
+    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool = cmdPool_;
+    cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer cmd;
+    if (vkAllocateCommandBuffers(device_, &cbai, &cmd) != VK_SUCCESS) {
+        DestroyOffscreenTarget();
+        return false;
+    }
+    VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VkImageMemoryBarrier barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = offscreenColorImage_;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+    vkBeginCommandBuffer(cmd, &bi);
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
+                         nullptr, 0, nullptr, 1, &barrier);
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkQueueSubmit(graphicsQueue_, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(graphicsQueue_);
+    vkFreeCommandBuffers(device_, cmdPool_, 1, &cmd);
     return true;
+}
+
+void VulkanRenderer::DestroyOffscreenTarget() {
+    if (device_ == VK_NULL_HANDLE) {
+        return;
+    }
+    if (offscreenFramebuffer_ != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(device_, offscreenFramebuffer_, nullptr);
+        offscreenFramebuffer_ = VK_NULL_HANDLE;
+    }
+    if (offscreenColorView_ != VK_NULL_HANDLE) {
+        vkDestroyImageView(device_, offscreenColorView_, nullptr);
+        offscreenColorView_ = VK_NULL_HANDLE;
+    }
+    if (offscreenColorImage_ != VK_NULL_HANDLE) {
+        vkDestroyImage(device_, offscreenColorImage_, nullptr);
+        offscreenColorImage_ = VK_NULL_HANDLE;
+    }
+    if (offscreenColorMemory_ != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, offscreenColorMemory_, nullptr);
+        offscreenColorMemory_ = VK_NULL_HANDLE;
+    }
 }
 
 static VkShaderModule CreateShaderModuleFromSpv(VkDevice device, const uint32_t* code, size_t size);
@@ -1327,8 +1445,7 @@ void VulkanRenderer::Shutdown() {
         vkDestroyDescriptorPool(device_, descPool_, nullptr);
         vkDestroyDescriptorSetLayout(device_, descSetLayout_, nullptr);
 
-        for (auto fb : framebuffers_) vkDestroyFramebuffer(device_, fb, nullptr);
-        framebuffers_.clear();
+        DestroyOffscreenTarget();
 
         vkDestroyImageView(device_, depthImageView_, nullptr);
         vkDestroyImage(device_, depthImage_, nullptr);
@@ -1369,8 +1486,7 @@ void VulkanRenderer::UpdateDestRect() {
 }
 
 void VulkanRenderer::CleanupSwapchain() {
-    for (auto fb : framebuffers_) vkDestroyFramebuffer(device_, fb, nullptr);
-    framebuffers_.clear();
+    DestroyOffscreenTarget();
 
     if (depthImageView_ != VK_NULL_HANDLE) vkDestroyImageView(device_, depthImageView_, nullptr);
     if (depthImage_ != VK_NULL_HANDLE) vkDestroyImage(device_, depthImage_, nullptr);
@@ -1396,7 +1512,7 @@ bool VulkanRenderer::RecreateSwapchain() {
 
     vkDeviceWaitIdle(device_);
     CleanupSwapchain();
-    if (!CreateSwapchain() || !CreateDepthBuffer() || !CreateFramebuffers()) {
+    if (!CreateSwapchain() || !CreateDepthBuffer() || !CreateOffscreenTarget()) {
         fprintf(stderr, "[Vulkan] Failed to recreate swapchain\n");
         return false;
     }
@@ -1455,7 +1571,7 @@ void VulkanRenderer::BeginScene() {
         rpbi.renderArea.extent = { static_cast<uint32_t>(verticalWidth_), static_cast<uint32_t>(verticalHeight_) };
     } else {
         rpbi.renderPass = renderPass_;
-        rpbi.framebuffer = framebuffers_[currentImageIndex_];
+        rpbi.framebuffer = offscreenFramebuffer_;
         rpbi.renderArea.offset = { 0, 0 };
         rpbi.renderArea.extent = swapchainExtent_;
     }
@@ -1483,7 +1599,9 @@ void VulkanRenderer::EndScene() {
         vkCmdEndRenderPass(frame.cmdBuffer);
         passActive_ = false;
     }
-    vkEndCommandBuffer(frame.cmdBuffer);
+    // NOTE: the command buffer stays OPEN here. Present() still records the
+    // swapchain glue (barriers + copy + vertical compose) into it and only
+    // calls vkEndCommandBuffer right before the queue submit.
 
     inScene_ = false;
     frameReady_ = true;
@@ -1529,7 +1647,7 @@ void VulkanRenderer::Present() {
 
         VkRenderPassBeginInfo cRp{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
         cRp.renderPass = renderPass_;
-        cRp.framebuffer = framebuffers_[currentImageIndex_];
+        cRp.framebuffer = offscreenFramebuffer_;
         cRp.renderArea.offset = { 0, 0 };
         cRp.renderArea.extent = swapchainExtent_;
         cRp.clearValueCount = static_cast<uint32_t>(composeClear.size());
@@ -1564,9 +1682,80 @@ void VulkanRenderer::Present() {
         verticalCompositionTransitionBlack_ = false;
     }
 
+    // ── Copy the finished offscreen colour image onto the swapchain image. ──
+    // The whole scene rendered into the persistent offscreen target, so this
+    // is a plain 1:1 image copy; no render pass ever touches the swapchain
+    // itself (see CreateOffscreenTarget). The acquired image transitions
+    // UNDEFINED -> TRANSFER_DST -> PRESENT_SRC (UNDEFINED is legal regardless
+    // of the driver's current layout and contents are fully overwritten).
+    VkImageCopy copy{};
+    copy.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    copy.srcOffset = { 0, 0, 0 };
+    copy.dstOffset = { 0, 0, 0 };
+    copy.extent = { swapchainExtent_.width, swapchainExtent_.height, 1 };
+
+    VkImageMemoryBarrier blitBarriers[2]{};
+    blitBarriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    blitBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    blitBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    blitBarriers[0].image = offscreenColorImage_;
+    blitBarriers[0].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    blitBarriers[0].oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    blitBarriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    blitBarriers[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    blitBarriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    blitBarriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    blitBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    blitBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    blitBarriers[1].image = swapchainImages_[currentImageIndex_];
+    blitBarriers[1].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    blitBarriers[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    blitBarriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    blitBarriers[1].srcAccessMask = 0;
+    blitBarriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(frame.cmdBuffer,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, blitBarriers);
+
+    vkCmdCopyImage(frame.cmdBuffer, offscreenColorImage_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   swapchainImages_[currentImageIndex_], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+    VkImageMemoryBarrier postBarriers[2]{};
+    postBarriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    postBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    postBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    postBarriers[0].image = offscreenColorImage_;
+    postBarriers[0].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    postBarriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    postBarriers[0].newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    postBarriers[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    postBarriers[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    postBarriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    postBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    postBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    postBarriers[1].image = swapchainImages_[currentImageIndex_];
+    postBarriers[1].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    postBarriers[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    postBarriers[1].newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    postBarriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    postBarriers[1].dstAccessMask = 0;
+    vkCmdPipelineBarrier(frame.cmdBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0,
+                         nullptr, 0, nullptr, 2, postBarriers);
+
+    if (vkEndCommandBuffer(frame.cmdBuffer) != VK_SUCCESS) {
+        frameReady_ = false;
+        inScene_ = false;
+        return;
+    }
+
     VkSubmitInfo submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     VkSemaphore waitSemaphores[] = { frame.imageAvailable };
-    VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+    // The only swapchain access is the TRANSFER-stage image copy above, so
+    // the acquire semaphore only needs to gate that stage. (Scene draws only
+    // touch the offscreen target and are independent of the acquire.)
+    VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_TRANSFER_BIT };
     submitInfo.waitSemaphoreCount = 1;
     submitInfo.pWaitSemaphores = waitSemaphores;
     submitInfo.pWaitDstStageMask = waitStages;
@@ -1628,7 +1817,7 @@ void VulkanRenderer::Clear(uint32_t argb, bool clearDepth) {
         rpbi.renderArea.extent = { static_cast<uint32_t>(verticalWidth_), static_cast<uint32_t>(verticalHeight_) };
     } else {
         rpbi.renderPass = clearDepth ? renderPass_ : renderPassResume_;
-        rpbi.framebuffer = framebuffers_[currentImageIndex_];
+        rpbi.framebuffer = offscreenFramebuffer_;
         rpbi.renderArea.offset = { 0, 0 };
         rpbi.renderArea.extent = swapchainExtent_;
     }
@@ -2499,18 +2688,19 @@ void VulkanRenderer::ReleaseStaging() {
 }
 
 void VulkanRenderer::CaptureScreen(TextureHandle target, int left, int top, int width, int height) {
-    // Runs between frames (right after Present), when the swapchain image that
-    // was just presented is idle and in the PRESENT_SRC layout.
-    if (inScene_ || swapchain_ == VK_NULL_HANDLE) return;
-    if (target >= textures_.size() || currentImageIndex_ >= swapchainImages_.size()) return;
+    // Runs between frames (right after Present). Reads the persistent offscreen
+    // colour image, which always holds exactly the last rendered frame — unlike
+    // the swapchain images, whose content/order is driver-controlled.
+    if (inScene_ || offscreenColorImage_ == VK_NULL_HANDLE) return;
+    if (target >= textures_.size()) return;
     if (width <= 0 || height <= 0) return;
     auto& dst = textures_[target];
     if (dst.width == 0 || dst.height == 0) return;
 
-    // The 640x480 game image is letter-boxed into the swapchain; map the
-    // source rect (given in game space) into swapchain pixels. The rendered
-    // image occupies exactly that region, so what is read back is the same
-    // content a D3D8 backbuffer would hold.
+    // The 640x480 game image is letter-boxed into the offscreen target; map the
+    // source rect (given in game space) into its pixels. The rendered image
+    // occupies exactly that region, so what is read back is the same content a
+    // D3D8 backbuffer would hold.
     int ix0 = static_cast<int>(std::lround(destX_ + static_cast<float>(left) / 640.0f * destW_));
     int iy0 = static_cast<int>(std::lround(destY_ + static_cast<float>(top) / 480.0f * destH_));
     int iw = static_cast<int>(std::lround(static_cast<float>(width) / 640.0f * destW_));
@@ -2522,7 +2712,7 @@ void VulkanRenderer::CaptureScreen(TextureHandle target, int left, int top, int 
     if (iw <= 0 || ih <= 0) return;
 
     VkDeviceSize stagingSize = 0;
-    if (!CopySwapchainRegion(ix0, iy0, iw, ih, &stagingSize)) return;
+    if (!CopyOffscreenRegion(ix0, iy0, iw, ih, &stagingSize)) return;
 
     // Swapchain pixels are BGRA (preferred format) or RGBA; the source buffer
     // for BlitPixelsToTexture is 0xAARRGGBB.
@@ -2547,8 +2737,7 @@ void VulkanRenderer::CaptureScreen(TextureHandle target, int left, int top, int 
 
 bool VulkanRenderer::ReadGameImage(std::vector<uint32_t>& argbOut) {
     argbOut.clear();
-    if (inScene_ || swapchain_ == VK_NULL_HANDLE) return false;
-    if (currentImageIndex_ >= swapchainImages_.size()) return false;
+    if (inScene_ || offscreenColorImage_ == VK_NULL_HANDLE) return false;
 
     int iw = static_cast<int>(std::lround(destW_));
     int ih = static_cast<int>(std::lround(destH_));
@@ -2557,7 +2746,7 @@ bool VulkanRenderer::ReadGameImage(std::vector<uint32_t>& argbOut) {
     if (iw <= 0 || ih <= 0) return false;
 
     VkDeviceSize stagingSize = 0;
-    if (!CopySwapchainRegion(ix0, iy0, iw, ih, &stagingSize)) return false;
+    if (!CopyOffscreenRegion(ix0, iy0, iw, ih, &stagingSize)) return false;
 
     bool rgbaOrder = (swapchainFormat_ == VK_FORMAT_R8G8B8A8_UNORM);
     argbOut.resize(static_cast<size_t>(iw) * ih);
@@ -2659,7 +2848,7 @@ void VulkanRenderer::SetVerticalTransitionBlack(bool black) {
     verticalCompositionTransitionBlack_ = black;
 }
 
-bool VulkanRenderer::CopySwapchainRegion(int ix0, int iy0, int iw, int ih, VkDeviceSize* outSize) {
+bool VulkanRenderer::CopyOffscreenRegion(int ix0, int iy0, int iw, int ih, VkDeviceSize* outSize) {
     if (!EnsureStaging(static_cast<VkDeviceSize>(iw) * ih * 4)) return false;
 
     vkQueueWaitIdle(graphicsQueue_);
@@ -2678,32 +2867,35 @@ bool VulkanRenderer::CopySwapchainRegion(int ix0, int iy0, int iw, int ih, VkDev
         return false;
     }
 
+    // The offscreen colour image always rests in COLOR_ATTACHMENT_OPTIMAL
+    // between frames (see CreateOffscreenTarget / Present); flip it to
+    // TRANSFER_SRC for the readback and flip it back afterwards.
     VkImageMemoryBarrier barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = swapchainImages_[currentImageIndex_];
+    barrier.image = offscreenColorImage_;
     barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     barrier.subresourceRange.levelCount = 1;
     barrier.subresourceRange.layerCount = 1;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    barrier.srcAccessMask = 0;
+    barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 
     VkBufferImageCopy region{};
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     region.imageSubresource.layerCount = 1;
     region.imageOffset = { ix0, iy0, 0 };
     region.imageExtent = { static_cast<uint32_t>(iw), static_cast<uint32_t>(ih), 1 };
-    vkCmdCopyImageToBuffer(cmd, swapchainImages_[currentImageIndex_], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuffer_, 1, &region);
+    vkCmdCopyImageToBuffer(cmd, offscreenColorImage_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuffer_, 1, &region);
 
-    // Restore the present layout so the image stays presentable.
+    // Restore the colour-attachment layout for the next frame's render passes.
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    barrier.dstAccessMask = 0;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 
     vkEndCommandBuffer(cmd);
 

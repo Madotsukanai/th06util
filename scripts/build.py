@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Unified build script for th06util (Touhou Koumakyou ~ Embodiment of Scarlet Devil).
 
-The default backend is Vulkan (SDL2 + src/render/). Pass --d3d8 to build the
-legacy Direct3D 8 backend instead.
+The default backend is Direct3D 8. Pass --vulkan to build the Vulkan backend
+(SDL2 + src/render/) instead.
 
 Handles:
   - Original executable verification (resources/game.exe)
@@ -13,7 +13,7 @@ Handles:
   - Clean and distclean
 
 Usage:
-  python3 scripts/build.py [target] [options] [--d3d8]
+  python3 scripts/build.py [target] [options] [--vulkan]
 
 Targets:
   all       Build game and companion tools (default)
@@ -24,8 +24,8 @@ Targets:
   distclean Remove entire build directory including FluidSynth
 
 Backends:
-  (default) Vulkan   -> launcher_vulkan.exe
-  --d3d8    Direct3D 8 -> launcher_d3d8.exe
+  (default) Direct3D 8 -> launcher_d3d8.exe
+  --vulkan  Vulkan     -> launcher_vulkan.exe
 """
 import argparse
 import os
@@ -222,7 +222,7 @@ def obj_path(src: str, obj_dir: Path = MINGW_OBJ_DIR) -> Path:
 def build_game(arch_flag: str = "-msse2", jobs: int = 1, verbose: bool = False,
                opt: str = "-O2", lto: bool = False, warn: bool = False,
                linker: str = "lld", ccache: bool = True,
-               backend: str = BACKEND_VULKAN):
+               backend: str = BACKEND_D3D8):
     """Build build/th06util.exe for the selected backend."""
     is_vulkan = backend == BACKEND_VULKAN
     obj_dir = MINGW_OBJ_DIR_VULKAN if is_vulkan else MINGW_OBJ_DIR
@@ -399,7 +399,7 @@ def build_game(arch_flag: str = "-msse2", jobs: int = 1, verbose: bool = False,
     return out
 
 
-def build_extras(backend: str = BACKEND_VULKAN):
+def build_extras(backend: str = BACKEND_D3D8):
     """Build companion tools: kouma_patch.delta, th06_spell_practice.dll, launcher."""
     is_vulkan = backend == BACKEND_VULKAN
     obj_dir = MINGW_OBJ_DIR_VULKAN if is_vulkan else MINGW_OBJ_DIR
@@ -462,7 +462,7 @@ def build_extras(backend: str = BACKEND_VULKAN):
     print(f"OK  build/{launcher_name}  ({launcher.stat().st_size:,} bytes)")
 
 
-def build_package(backend: str = BACKEND_VULKAN):
+def build_package(backend: str = BACKEND_D3D8):
     """Build all and create build/th06UtilityTool.zip."""
     is_vulkan = backend == BACKEND_VULKAN
     launcher_name = "launcher_vulkan.exe" if is_vulkan else "launcher_d3d8.exe"
@@ -542,13 +542,17 @@ def main():
     parser.add_argument("--no-ccache", action="store_true", help="Disable ccache")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--warn", action="store_true", help="Show compilation warnings")
+    parser.add_argument("--vulkan", action="store_true",
+                        help="Build the Vulkan backend instead of the default Direct3D 8")
     parser.add_argument("--d3d8", action="store_true",
-                        help="Build the legacy Direct3D 8 backend instead of Vulkan")
+                        help="Build the Direct3D 8 backend (default; kept for compatibility)")
     args = parser.parse_args()
+    if args.vulkan and args.d3d8:
+        parser.error("--vulkan and --d3d8 are mutually exclusive")
 
     arch_flag = f"-m{args.arch}"
-    backend = BACKEND_D3D8 if args.d3d8 else BACKEND_VULKAN
-    backend_label = "Direct3D 8" if args.d3d8 else "Vulkan"
+    backend = BACKEND_VULKAN if args.vulkan else BACKEND_D3D8
+    backend_label = "Vulkan" if args.vulkan else "Direct3D 8"
 
     if args.target == "clean":
         clean()

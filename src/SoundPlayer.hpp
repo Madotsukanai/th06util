@@ -69,7 +69,9 @@ struct SoundPlayer
     void PlaySoundByIdx(SoundIdx idx, i32 unused);
     ZunResult PlayBGM(BOOL isLooping);
     ZunResult PauseBGM();
+    ZunResult PauseSE();
     ZunResult ResumeBGM();
+    ZunResult ResumeSE();
     void StopBGM();
     void UpdateBGMSpeed();
 

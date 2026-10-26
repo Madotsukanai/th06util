@@ -31,7 +31,7 @@ void main() {
     }
 
     // D3DRS_ALPHATEST: ALPHAREF = 4, ALPHAFUNC = GREATEREQUAL
-    if (col.a < 3.5 / 255.0) {
+    if (col.a < 4.0 / 255.0) {
         discard;
     }
 

@@ -33,6 +33,7 @@ char *g_SFXList[26] = {
 };
 SoundPlayer g_SoundPlayer;
 BOOL g_IsBgmPaused;
+static BOOL s_IsSePaused;
 
 SoundPlayer::SoundPlayer()
 {
@@ -147,6 +148,7 @@ ZunResult SoundPlayer::Release(void)
 void SoundPlayer::StopBGM()
 {
     g_IsBgmPaused = FALSE;
+    s_IsSePaused = FALSE;
 
     if (this->backgroundMusic != NULL)
     {
@@ -184,6 +186,34 @@ ZunResult SoundPlayer::PauseBGM()
     return ZUN_SUCCESS;
 }
 
+ZunResult SoundPlayer::PauseSE()
+{
+    i32 idx;
+
+    if (s_IsSePaused)
+    {
+        return ZUN_SUCCESS;
+    }
+    if (this->manager == NULL)
+    {
+        return ZUN_ERROR;
+    }
+    for (idx = 0; idx < (i32)ARRAY_SIZE(g_SoundBufferIdxVol); idx++)
+    {
+        if (this->duplicateSoundBuffers[idx] != NULL)
+        {
+            this->duplicateSoundBuffers[idx]->Stop();
+        }
+    }
+    for (idx = 0; idx < ARRAY_SIZE_SIGNED(this->soundBuffersToPlay); idx++)
+    {
+        this->soundBuffersToPlay[idx] = -1;
+    }
+    s_IsSePaused = TRUE;
+    utils::DebugPrint2("pause SE\n");
+    return ZUN_SUCCESS;
+}
+
 ZunResult SoundPlayer::ResumeBGM()
 {
     HRESULT res;
@@ -200,6 +230,12 @@ ZunResult SoundPlayer::ResumeBGM()
     }
 
     g_IsBgmPaused = FALSE;
+    return ZUN_SUCCESS;
+}
+
+ZunResult SoundPlayer::ResumeSE()
+{
+    s_IsSePaused = FALSE;
     return ZUN_SUCCESS;
 }
 
@@ -515,6 +551,7 @@ ZunResult SoundPlayer::PlayBGM(BOOL isLooping)
     }
     this->isLooping = isLooping;
     g_IsBgmPaused = FALSE;
+    s_IsSePaused = FALSE;
     return ZUN_SUCCESS;
 }
 

@@ -1442,6 +1442,12 @@ ZunResult Supervisor::LoadConfig(char *path)
     else
     {
         g_Supervisor.cfg = *data;
+        // DIAG(cfgread): confirm the vanilla-aligned layout reads the user file
+        th06::utils::LogDebug("CFGREAD size=%d version=0x%x life=%d bomb=%d music=%d win=%d opts=0x%x",
+                              (i32)g_LastFileSize, g_Supervisor.cfg.version,
+                              (i32)g_Supervisor.cfg.lifeCount, (i32)g_Supervisor.cfg.bombCount,
+                              (i32)g_Supervisor.cfg.musicMode, (i32)g_Supervisor.cfg.windowed,
+                              (u32)g_Supervisor.cfg.opts);
         if ((g_Supervisor.cfg.lifeCount >= 5) || (g_Supervisor.cfg.bombCount >= 4) ||
             (g_Supervisor.cfg.colorMode16bit >= 2) || (g_Supervisor.cfg.musicMode >= 3) ||
             (g_Supervisor.cfg.defaultDifficulty >= 5) || (g_Supervisor.cfg.playSounds >= 2) ||
@@ -1794,23 +1800,37 @@ ZunResult Supervisor::StopAudio()
 
 ZunResult Supervisor::PauseAudio()
 {
+    ZunResult res = ZUN_SUCCESS;
+
+    g_SoundPlayer.PauseSE();
+
     if (s_activeMusicMode == MIDI)
     {
         if (g_Supervisor.midiOutput != NULL)
         {
-            return g_Supervisor.midiOutput->PausePlayback();
+            res = g_Supervisor.midiOutput->PausePlayback();
+        }
+        else
+        {
+            res = ZUN_ERROR;
         }
     }
     else if (s_activeMusicMode == WAV)
     {
-        return g_SoundPlayer.PauseBGM();
+        res = g_SoundPlayer.PauseBGM();
+    }
+    else
+    {
+        res = ZUN_ERROR;
     }
 
-    return ZUN_ERROR;
+    return res;
 }
 
 ZunResult Supervisor::ResumeAudio()
 {
+    g_SoundPlayer.ResumeSE();
+
     if (s_activeMusicMode == MIDI)
     {
         if (g_Supervisor.midiOutput != NULL)
