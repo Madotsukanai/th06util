@@ -12,7 +12,7 @@
 #include "Player.hpp"
 #include "ReplayManager.hpp"
 #include "Rng.hpp"
-#include "SpellPracticeDllApi.hpp"
+#include "SpellPracticeApi.hpp"
 #include "Supervisor.hpp"
 #include "diffbuild.hpp"
 #include "utils.hpp"

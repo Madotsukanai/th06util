@@ -9,7 +9,7 @@
 #include "Gui.hpp"
 #include "ReplayManager.hpp"
 #include "ResultScreen.hpp"
-#include "SpellPracticeDllApi.hpp"
+#include "SpellPracticeApi.hpp"
 #include "Stage.hpp"
 #include "Supervisor.hpp"
 #include "utils.hpp"

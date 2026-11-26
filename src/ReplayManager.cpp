@@ -26,8 +26,8 @@ static i32 s_SavedIsOnline = 0;
 #define ONLINE_REPLAY_MAGIC "T6ON"
 #define ONLINE_REPLAY_VERSION 1
 
-// Highest TH06Section value the bundled th06_spell_practice.dll can select (see
-// spell_practice_dll/th06_spell_practice.cpp).  StageReplayData::spellSection overlaps
+// Highest TH06Section value the spell practice menu can select (see
+// src/SpellPractice.cpp).  StageReplayData::spellSection overlaps
 // padding that is uninitialized in replays written by the original game (the shipped
 // attract demos contain 0xCD filler), so a value outside this range must be ignored.
 #define SPELL_PRACTICE_MAX_SECTION 116

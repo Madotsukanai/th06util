@@ -245,6 +245,8 @@ extern i32 g_ReplayTotalFrames;
 extern u16 g_RealCurFrameInput;
 extern i32 g_LastSpellPracticeIndex;
 extern i32 g_SpellPracticeRank;
+extern i32 g_SpellPracticePower;
+extern i32 g_SpellPracticeScore;
 extern i32 g_ReturnToPractice;
 extern i32 g_SpellPracticeLastSelectedSpellIndex;
 extern i32 g_MoveShift;

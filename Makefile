@@ -27,9 +27,9 @@ submodules:
 help:
 	@echo "th06UtilityTool Build System"
 	@echo "Usage:"
-	@echo "  make              - Build all targets (th06util.exe, launcher.exe, patch, dll)"
+	@echo "  make              - Build all targets (th06util.exe, launcher.exe, patch)"
 	@echo "  make game         - Build th06util.exe only"
-	@echo "  make extras       - Build companion tools (launcher, patch delta, dll)"
+	@echo "  make extras       - Build companion tools (launcher, patch delta)"
 	@echo "  make package      - Build all targets and bundle into build/th06UtilityTool.zip"
 	@echo "  make clean        - Remove game/tool build artifacts"
 	@echo "  make distclean    - Remove all build files including FluidSynth library"

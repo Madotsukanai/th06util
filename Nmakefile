@@ -2,9 +2,9 @@
 # Nmakefile for Windows (Microsoft NMAKE)
 # ====================================================================
 # Usage:
-#   nmake /f Nmakefile           Build all (th06util.exe, launcher.exe, patch, dll)
+#   nmake /f Nmakefile           Build all (th06util.exe, launcher.exe, patch)
 #   nmake /f Nmakefile game      Build th06util.exe only
-#   nmake /f Nmakefile extras    Build companion tools (launcher, patch, dll)
+#   nmake /f Nmakefile extras    Build companion tools (launcher, patch)
 #   nmake /f Nmakefile package   Create build\th06UtilityTool.zip
 #   nmake /f Nmakefile clean     Clean build artifacts
 # ====================================================================

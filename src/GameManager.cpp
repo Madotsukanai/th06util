@@ -12,7 +12,7 @@
 #include "Rng.hpp"
 #include "ScreenEffect.hpp"
 #include "SoundPlayer.hpp"
-#include "SpellPracticeDllApi.hpp"
+#include "SpellPracticeApi.hpp"
 #include "Stage.hpp"
 #include "Supervisor.hpp"
 #include "utils.hpp"
@@ -610,6 +610,8 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
         default:
             mgr->currentPower = 128;
         }
+        if (g_SpellPracticePower != SPELL_PRACTICE_POWER_AUTO)
+            mgr->currentPower = (u16)g_SpellPracticePower;
     }
     else if (g_IsSpellPracticeGame == 0 && g_Supervisor.curState != SUPERVISOR_STATE_GAMEMANAGER_REINIT)
     {
@@ -673,29 +675,13 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
     }
     if (g_IsSpellPracticeGame > 0)
     {
-
-        HMODULE hDll = LoadLibraryA("th06_spell_practice.dll");
-        if (hDll == NULL)
-            hDll = LoadLibraryA("spell_practice.dll");
-        SpellPracticeApplyEclPatchFn applyFn = NULL;
-        if (hDll != NULL)
-            applyFn = (SpellPracticeApplyEclPatchFn)GetProcAddress(hDll, "th06_spell_practice_apply_ecl_patch");
-        th06::utils::LogDebug("SpellPractice: g_IsSpellPracticeGame=%d hDll=%p applyFn=%p eclFile=%p",
-                              g_IsSpellPracticeGame, hDll, applyFn, g_EclManager.eclFile);
-        if (applyFn != NULL)
-        {
-
-            int shot = mgr->character * 2 + mgr->shotType;
-            int res = applyFn(g_IsSpellPracticeGame, g_EclManager.eclFile, shot);
-            g_SpellPracticeWarpTime = res & 0xFFFF;
-            g_SpellPracticeBossSubId = (res >> 16) & 0xFFFF;
-
-            EnemyEclInstr::g_PlayerShot = shot;
-            th06::utils::LogDebug("SpellPractice: res=%d warpTime=%d bossSubId=%d shot=%d", res,
-                                  g_SpellPracticeWarpTime, g_SpellPracticeBossSubId, shot);
-        }
-        if (hDll != NULL)
-            FreeLibrary(hDll);
+        int shot = mgr->character * 2 + mgr->shotType;
+        int res = th06_spell_practice_apply_ecl_patch(g_IsSpellPracticeGame, g_EclManager.eclFile, shot);
+        g_SpellPracticeWarpTime = res & 0xFFFF;
+        g_SpellPracticeBossSubId = (res >> 16) & 0xFFFF;
+        EnemyEclInstr::g_PlayerShot = shot;
+        th06::utils::LogDebug("SpellPractice: res=%d warpTime=%d bossSubId=%d shot=%d", res,
+                              g_SpellPracticeWarpTime, g_SpellPracticeBossSubId, shot);
     }
     else
     {
@@ -1029,7 +1015,11 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
         }
         if (g_IsSpellPracticeGame != 0)
         {
-            if (g_IsSpellPracticeGame == 2)
+            if (g_SpellPracticePower != SPELL_PRACTICE_POWER_AUTO)
+            {
+                mgr->currentPower = (u16)g_SpellPracticePower;
+            }
+            else if (g_IsSpellPracticeGame == 2)
                 mgr->currentPower = 30; // ST1_MID2 ムーンライトレイ
             else if (g_IsSpellPracticeGame == 4)
                 mgr->currentPower = 72; // ST1_BOSS2 ナイトバード
@@ -1047,7 +1037,15 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
         g_Supervisor.unk1b8 = 0.0;
     }
     mgr->isTimeStopped = false;
-    mgr->score = 0;
+    if (mgr->isInPracticeMode != 0)
+    {
+        mgr->score = (u32)g_SpellPracticeScore;
+        mgr->guiScore = mgr->score;
+    }
+    else
+    {
+        mgr->score = 0;
+    }
     mgr->isGameCompleted = 0;
     g_AsciiManager.InitializeVms();
     if (failedToLoadReplay)

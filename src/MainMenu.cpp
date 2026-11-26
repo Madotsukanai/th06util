@@ -17,7 +17,7 @@
 #include "ResultScreen.hpp"
 #include "ScreenEffect.hpp"
 #include "SoundPlayer.hpp"
-#include "SpellPracticeDllApi.hpp"
+#include "SpellPracticeApi.hpp"
 #include "Supervisor.hpp"
 #include "ZunBool.hpp"
 #include "ZunColor.hpp"
@@ -169,30 +169,18 @@ static ZunBool StartNetHostPrepareThread()
 }
 
 i16 g_LastJoystickInput;
-HMODULE g_SpellPracticeDllHandle;
-SpellPracticeOpenMenuFn g_SpellPracticeOpenMenuFn;
-SpellPracticeUpdateMenuFn g_SpellPracticeUpdateMenuFn;
-SpellPracticeGetDrawDataFn g_SpellPracticeGetDrawDataFn;
-th06::SpellPracticeCloseMenuFn g_SpellPracticeCloseMenuFn;
-th06::SpellPracticeDrawMenuFn g_SpellPracticeDrawMenuFn;
-th06::SpellPracticeGetSelectedSpellFn g_SpellPracticeGetSelectedSpellFn;
-th06::SpellPracticeGetSelectedParamsFn g_SpellPracticeGetSelectedParamsFn;
-th06::SpellPracticeSetCursorToSpellFn g_SpellPracticeSetCursorToSpellFn;
-th06::SpellPracticeApplyEclPatchFn g_SpellPracticeApplyEclPatchFn;
-th06::SpellPracticeGetLivesFn g_SpellPracticeGetLivesFn;
-th06::SpellPracticeSetLivesFn g_SpellPracticeSetLivesFn;
-th06::SpellPracticeGetBombsFn g_SpellPracticeGetBombsFn;
-th06::SpellPracticeSetBombsFn g_SpellPracticeSetBombsFn;
-th06::SpellPracticeGetRankFn g_SpellPracticeGetRankFn;
-th06::SpellPracticeSetRankFn g_SpellPracticeSetRankFn;
 static i32 g_SpellPracticeSavedLives = 8;
 static i32 g_SpellPracticeSavedBombs = 8;
 static ZunBool g_SpellPracticeFrontAnmLoaded = false;
 static ZunBool g_SpellPracticeStageConfiguring = false;
 static i32 g_SpellPracticeConfigCursor = 0;
 static i32 g_SpellPracticeSelectedStage = 0;
+static i32 g_SpellPracticeScoreDigit = 0;
+static i32 g_SpellPracticePowerHoldDir = 0;
+static i32 g_SpellPracticePowerHoldStep = 1;
+static u32 g_SpellPracticePrevDigitMask = 0;
 i32 g_SpellPracticeSelectedSpellIndex = -1;
-ZunBool g_IsSpellPracticeDllMenuActive;
+ZunBool g_IsSpellPracticeMenuActive;
 AnmVm g_SpellPracticeVms[24];
 static AnmVm g_SpellPracticeLivesIconVm;
 static AnmVm g_SpellPracticeBombsIconVm;
@@ -220,105 +208,26 @@ static void UnloadSpellPracticeFrontAnm()
     }
 }
 
-static void CloseSpellPracticeDllMenu()
+static void CloseSpellPracticeMenu()
 {
-    if (g_IsSpellPracticeDllMenuActive && g_SpellPracticeCloseMenuFn != NULL)
-    {
-        g_SpellPracticeCloseMenuFn();
-    }
     for (i32 i = 0; i < 24; i++)
     {
         g_SpellPracticeVms[i].flags.isVisible = 0;
     }
     UnloadSpellPracticeFrontAnm();
-    g_IsSpellPracticeDllMenuActive = false;
+    g_IsSpellPracticeMenuActive = false;
 }
 
-static void UnloadSpellPracticeDll()
+static void ResetSpellPracticeMenu()
 {
-    CloseSpellPracticeDllMenu();
-    g_SpellPracticeOpenMenuFn = NULL;
-    g_SpellPracticeUpdateMenuFn = NULL;
-    g_SpellPracticeGetDrawDataFn = NULL;
-    g_SpellPracticeCloseMenuFn = NULL;
-    g_SpellPracticeDrawMenuFn = NULL;
-    g_SpellPracticeGetSelectedSpellFn = NULL;
-    g_SpellPracticeApplyEclPatchFn = NULL;
-    g_SpellPracticeGetLivesFn = NULL;
-    g_SpellPracticeSetLivesFn = NULL;
-    g_SpellPracticeGetBombsFn = NULL;
-    g_SpellPracticeSetBombsFn = NULL;
-    g_SpellPracticeGetRankFn = NULL;
-    g_SpellPracticeSetRankFn = NULL;
-    g_SpellPracticeSetCursorToSpellFn = NULL;
+    CloseSpellPracticeMenu();
     g_SpellPracticeSelectedSpellIndex = -1;
-    if (g_SpellPracticeDllHandle != NULL)
-    {
-        FreeLibrary(g_SpellPracticeDllHandle);
-        g_SpellPracticeDllHandle = NULL;
-    }
-}
-
-static HMODULE EnsureSpellPracticeDllLoaded()
-{
-    if (g_SpellPracticeDllHandle != NULL)
-    {
-        return g_SpellPracticeDllHandle;
-    }
-
-    g_SpellPracticeDllHandle = LoadLibraryA("th06_spell_practice.dll");
-    if (g_SpellPracticeDllHandle == NULL)
-    {
-        g_SpellPracticeDllHandle = LoadLibraryA("spell_practice.dll");
-    }
-    if (g_SpellPracticeDllHandle == NULL)
-    {
-        return NULL;
-    }
-
-    g_SpellPracticeOpenMenuFn =
-        (SpellPracticeOpenMenuFn)GetProcAddress(g_SpellPracticeDllHandle, "th06_spell_practice_open_menu");
-    g_SpellPracticeUpdateMenuFn =
-        (SpellPracticeUpdateMenuFn)GetProcAddress(g_SpellPracticeDllHandle, "th06_spell_practice_update_menu");
-    g_SpellPracticeGetDrawDataFn =
-        (SpellPracticeGetDrawDataFn)GetProcAddress(g_SpellPracticeDllHandle, "th06_spell_practice_get_draw_data");
-    g_SpellPracticeCloseMenuFn =
-        (SpellPracticeCloseMenuFn)GetProcAddress(g_SpellPracticeDllHandle, "th06_spell_practice_close_menu");
-    g_SpellPracticeDrawMenuFn =
-        (th06::SpellPracticeDrawMenuFn)GetProcAddress(g_SpellPracticeDllHandle, "th06_spell_practice_draw_menu");
-    g_SpellPracticeApplyEclPatchFn = (th06::SpellPracticeApplyEclPatchFn)GetProcAddress(
-        g_SpellPracticeDllHandle, "th06_spell_practice_apply_ecl_patch");
-    g_SpellPracticeGetSelectedSpellFn = (th06::SpellPracticeGetSelectedSpellFn)GetProcAddress(
-        g_SpellPracticeDllHandle, "th06_spell_practice_get_selected_spell");
-    g_SpellPracticeGetSelectedParamsFn = (th06::SpellPracticeGetSelectedParamsFn)GetProcAddress(
-        g_SpellPracticeDllHandle, "th06_spell_practice_get_selected_params");
-    g_SpellPracticeSetCursorToSpellFn = (th06::SpellPracticeSetCursorToSpellFn)GetProcAddress(
-        g_SpellPracticeDllHandle, "th06_spell_practice_set_cursor_to_spell");
-    g_SpellPracticeGetLivesFn =
-        (th06::SpellPracticeGetLivesFn)GetProcAddress(g_SpellPracticeDllHandle, "th06_spell_practice_get_lives");
-    g_SpellPracticeSetLivesFn =
-        (th06::SpellPracticeSetLivesFn)GetProcAddress(g_SpellPracticeDllHandle, "th06_spell_practice_set_lives");
-    g_SpellPracticeGetBombsFn =
-        (th06::SpellPracticeGetBombsFn)GetProcAddress(g_SpellPracticeDllHandle, "th06_spell_practice_get_bombs");
-    g_SpellPracticeSetBombsFn =
-        (th06::SpellPracticeSetBombsFn)GetProcAddress(g_SpellPracticeDllHandle, "th06_spell_practice_set_bombs");
-    g_SpellPracticeGetRankFn =
-        (th06::SpellPracticeGetRankFn)GetProcAddress(g_SpellPracticeDllHandle, "th06_spell_practice_get_rank");
-    g_SpellPracticeSetRankFn =
-        (th06::SpellPracticeSetRankFn)GetProcAddress(g_SpellPracticeDllHandle, "th06_spell_practice_set_rank");
-
-    return g_SpellPracticeDllHandle;
 }
 
 static Difficulty g_SpellPracticePreExtraDifficulty = NORMAL;
 
-static i32 TryOpenSpellPracticeDllMenu(i32 stageIndex)
+static i32 TryOpenSpellPracticeMenu(i32 stageIndex)
 {
-    if (EnsureSpellPracticeDllLoaded() == NULL || g_SpellPracticeOpenMenuFn == NULL)
-    {
-        return SPELL_PRACTICE_OPEN_RESULT_NOT_HANDLED;
-    }
-
     {
         ScoreDat *sd = ResultScreen::OpenScore("score.dat");
         if (sd != NULL)
@@ -336,49 +245,48 @@ static i32 TryOpenSpellPracticeDllMenu(i32 stageIndex)
 
     LoadSpellPracticeFrontAnm();
 
-    i32 openMenuResult = g_SpellPracticeOpenMenuFn(g_Supervisor.hwndGameWindow, g_GameManager.difficulty,
-                                                   g_GameManager.character, g_GameManager.shotType, stageIndex, NULL);
+    i32 openMenuResult = th06_spell_practice_open_menu(g_Supervisor.hwndGameWindow, g_GameManager.difficulty,
+                                                      g_GameManager.character, g_GameManager.shotType, stageIndex, NULL);
 
-    if (g_SpellPracticeSetLivesFn != NULL)
-        g_SpellPracticeSetLivesFn(g_SpellPracticeSavedLives);
-    if (g_SpellPracticeSetBombsFn != NULL)
-        g_SpellPracticeSetBombsFn(g_SpellPracticeSavedBombs);
-    if (g_SpellPracticeSetRankFn != NULL)
-        g_SpellPracticeSetRankFn(g_SpellPracticeRank);
-    g_IsSpellPracticeDllMenuActive = (openMenuResult == SPELL_PRACTICE_OPEN_RESULT_MENU_RUNNING);
-    if (!g_IsSpellPracticeDllMenuActive)
+    th06_spell_practice_set_lives(g_SpellPracticeSavedLives);
+    th06_spell_practice_set_bombs(g_SpellPracticeSavedBombs);
+    th06_spell_practice_set_rank(g_SpellPracticeRank);
+    th06_spell_practice_set_power(g_SpellPracticePower);
+    th06_spell_practice_set_score(g_SpellPracticeScore);
+    g_IsSpellPracticeMenuActive = (openMenuResult == SPELL_PRACTICE_OPEN_RESULT_MENU_RUNNING);
+    if (!g_IsSpellPracticeMenuActive)
     {
         if (stageIndex == 6)
             g_GameManager.difficulty = g_SpellPracticePreExtraDifficulty;
         if (openMenuResult == SPELL_PRACTICE_OPEN_RESULT_NOT_HANDLED)
-            UnloadSpellPracticeDll();
+            ResetSpellPracticeMenu();
     }
     return openMenuResult;
 }
 
-static i32 UpdateSpellPracticeDllMenu()
+static i32 UpdateSpellPracticeMenu()
 {
-    if (!g_IsSpellPracticeDllMenuActive || g_SpellPracticeUpdateMenuFn == NULL)
+    if (!g_IsSpellPracticeMenuActive)
     {
         return SPELL_PRACTICE_OPEN_RESULT_NOT_HANDLED;
     }
-    i32 result = g_SpellPracticeUpdateMenuFn(g_CurFrameInput, g_LastFrameInput, g_IsEigthFrameOfHeldInput);
+    i32 result = th06_spell_practice_update_menu(g_CurFrameInput, g_LastFrameInput, g_IsEigthFrameOfHeldInput);
     if (result != SPELL_PRACTICE_OPEN_RESULT_MENU_RUNNING)
     {
-        g_IsSpellPracticeDllMenuActive = false;
+        g_IsSpellPracticeMenuActive = false;
     }
     return result;
 }
 
-static ChainCallbackResult DrawSpellPracticeDllMenu(void *)
+static ChainCallbackResult DrawSpellPracticeMenu(void *)
 {
     if (Supervisor::IsQuickSettingsVisible())
         return CHAIN_CALLBACK_RESULT_CONTINUE;
-    if (!g_IsSpellPracticeDllMenuActive || g_SpellPracticeGetDrawDataFn == NULL)
+    if (!g_IsSpellPracticeMenuActive)
         return CHAIN_CALLBACK_RESULT_CONTINUE;
 
     SpellPracticeDrawData drawData;
-    if (g_SpellPracticeGetDrawDataFn(&drawData, g_GameManager.catk, CATK_NUM_CAPTURES) <= 0)
+    if (th06_spell_practice_get_draw_data(&drawData, g_GameManager.catk, CATK_NUM_CAPTURES) <= 0)
         return CHAIN_CALLBACK_RESULT_CONTINUE;
 
     const bool vertScale = (g_VerticalMode != 0);
@@ -404,7 +312,7 @@ static ChainCallbackResult DrawSpellPracticeDllMenu(void *)
         g_AnmManager->DrawNoRotation(vm);
     }
 
-    i32 lives = (g_SpellPracticeGetLivesFn != NULL) ? g_SpellPracticeGetLivesFn() : g_SpellPracticeSavedLives;
+    i32 lives = th06_spell_practice_get_lives();
     g_SpellPracticeSavedLives = lives;
     const float iconSpacing = vertScale ? 21.0f : 16.0f;
     const float iconScaleXY = vertScale ? (21.0f / 16.0f) : 1.0f;
@@ -418,7 +326,7 @@ static ChainCallbackResult DrawSpellPracticeDllMenu(void *)
         g_AnmManager->DrawNoRotation(&g_SpellPracticeLivesIconVm);
     }
 
-    i32 bombs = (g_SpellPracticeGetBombsFn != NULL) ? g_SpellPracticeGetBombsFn() : g_SpellPracticeSavedBombs;
+    i32 bombs = th06_spell_practice_get_bombs();
     g_SpellPracticeSavedBombs = bombs;
     const float bombsY = 138.0f * posScale;
     for (i32 i = 0; i < bombs; i++)
@@ -429,10 +337,95 @@ static ChainCallbackResult DrawSpellPracticeDllMenu(void *)
         g_AnmManager->DrawNoRotation(&g_SpellPracticeBombsIconVm);
     }
 
-    if (g_SpellPracticeGetRankFn != NULL)
-        g_SpellPracticeRank = g_SpellPracticeGetRankFn();
+    g_SpellPracticeRank = th06_spell_practice_get_rank();
+    g_SpellPracticePower = th06_spell_practice_get_power();
+    g_SpellPracticeScore = th06_spell_practice_get_score();
 
     return CHAIN_CALLBACK_RESULT_CONTINUE;
+}
+
+static u32 ReadScoreDigitKeys()
+{
+    if (g_Supervisor.hwndGameWindow != NULL && GetForegroundWindow() != g_Supervisor.hwndGameWindow)
+        return 0;
+    u32 mask = 0;
+    if (g_Supervisor.keyboard != NULL)
+    {
+        u8 state[256];
+        if (SUCCEEDED(g_Supervisor.keyboard->GetDeviceState(sizeof(state), state)))
+        {
+            static const u8 dik[20] = {DIK_0,        DIK_1,        DIK_2,        DIK_3,        DIK_4,
+                                       DIK_5,        DIK_6,        DIK_7,        DIK_8,        DIK_9,
+                                       DIK_NUMPAD0, DIK_NUMPAD1, DIK_NUMPAD2, DIK_NUMPAD3, DIK_NUMPAD4,
+                                       DIK_NUMPAD5, DIK_NUMPAD6, DIK_NUMPAD7, DIK_NUMPAD8, DIK_NUMPAD9};
+            for (i32 i = 0; i < 20; i++)
+            {
+                if ((state[dik[i]] & 0x80) != 0)
+                    mask |= 1u << (i % 10);
+            }
+            return mask;
+        }
+    }
+    for (i32 digit = 0; digit < 10; digit++)
+    {
+        if ((GetAsyncKeyState('0' + digit) & 0x8000) != 0 || (GetAsyncKeyState(VK_NUMPAD0 + digit) & 0x8000) != 0)
+            mask |= 1u << digit;
+    }
+    return mask;
+}
+
+static i32 PracticeScorePlace()
+{
+    i32 place = 1;
+    for (i32 i = g_SpellPracticeScoreDigit + 1; i < SPELL_PRACTICE_SCORE_DIGITS; i++)
+        place *= 10;
+    return place;
+}
+
+static void InputPracticeScoreDigit(i32 digit)
+{
+    i32 place = PracticeScorePlace();
+    i32 oldDigit = (g_SpellPracticeScore / place) % 10;
+    g_SpellPracticeScore += (digit - oldDigit) * place;
+    if (g_SpellPracticeScoreDigit < SPELL_PRACTICE_SCORE_DIGITS - 1)
+        g_SpellPracticeScoreDigit++;
+}
+
+static i32 ChangePracticePower(i32 power, i32 dir, bool newlyPressed, bool repeating)
+{
+    if (dir == 0)
+    {
+        g_SpellPracticePowerHoldDir = 0;
+        g_SpellPracticePowerHoldStep = 1;
+        return power;
+    }
+    if (newlyPressed || g_SpellPracticePowerHoldDir != dir)
+    {
+        g_SpellPracticePowerHoldDir = dir;
+        g_SpellPracticePowerHoldStep = 1;
+    }
+    else if (repeating)
+    {
+        if (g_SpellPracticePowerHoldStep < SPELL_PRACTICE_POWER_STEP_MAX)
+            g_SpellPracticePowerHoldStep++;
+    }
+    else
+    {
+        return power;
+    }
+    if (dir < 0)
+    {
+        power -= g_SpellPracticePowerHoldStep;
+        if (power < SPELL_PRACTICE_POWER_AUTO)
+            power = SPELL_PRACTICE_POWER_AUTO;
+    }
+    else
+    {
+        power += g_SpellPracticePowerHoldStep;
+        if (power > SPELL_PRACTICE_POWER_MAX)
+            power = SPELL_PRACTICE_POWER_MAX;
+    }
+    return power;
 }
 
 static void DrawCollisionRecordWarning()
@@ -583,11 +576,11 @@ static bool ReturnToTitleWithQ(MainMenu *menu)
     case STATE_SHOT_SELECT:
     case STATE_PRACTICE_LVL_SELECT:
 
-        if (g_IsSpellPracticeDllMenuActive && (menu->cursor == 6 || g_SpellPracticeSelectedStage == 6))
+        if (g_IsSpellPracticeMenuActive && (menu->cursor == 6 || g_SpellPracticeSelectedStage == 6))
         {
             g_GameManager.difficulty = g_SpellPracticePreExtraDifficulty;
         }
-        CloseSpellPracticeDllMenu();
+        CloseSpellPracticeMenu();
         g_SpellPracticeStageConfiguring = false;
         g_ReturnToSpellPractice = 0;
         g_ReturnToPractice = 0;
@@ -632,10 +625,8 @@ static ChainCallbackResult StartGameFromMenu(MainMenu *menu)
     g_GameManager.bombsRemaining = g_Supervisor.cfg.bombCount;
     if (g_GameManager.isInPracticeMode != 0)
     {
-        g_GameManager.livesRemaining =
-            (g_SpellPracticeGetLivesFn != NULL) ? g_SpellPracticeGetLivesFn() : g_SpellPracticeSavedLives;
-        g_GameManager.bombsRemaining =
-            (g_SpellPracticeGetBombsFn != NULL) ? g_SpellPracticeGetBombsFn() : g_SpellPracticeSavedBombs;
+        g_GameManager.livesRemaining = th06_spell_practice_get_lives();
+        g_GameManager.bombsRemaining = th06_spell_practice_get_bombs();
     }
     else if (g_GameManager.difficulty == EXTRA)
     {
@@ -1458,41 +1449,32 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
         }
         break;
     case STATE_PRACTICE_LVL_SELECT:
-        if (g_ReturnToSpellPractice && !g_IsSpellPracticeDllMenuActive)
+        if (g_ReturnToSpellPractice && !g_IsSpellPracticeMenuActive)
         {
             g_ReturnToSpellPractice = 0;
-            i32 autoOpenResult = TryOpenSpellPracticeDllMenu(menu->cursor);
+            i32 autoOpenResult = TryOpenSpellPracticeMenu(menu->cursor);
             if (autoOpenResult == SPELL_PRACTICE_OPEN_RESULT_MENU_RUNNING)
             {
-                if (g_SpellPracticeSetCursorToSpellFn != NULL && g_LastSpellPracticeIndex >= 0)
-                    g_SpellPracticeSetCursorToSpellFn(g_LastSpellPracticeIndex);
+                if (g_LastSpellPracticeIndex >= 0)
+                    th06_spell_practice_set_cursor_to_spell(g_LastSpellPracticeIndex);
                 break;
             }
         }
-        if (g_IsSpellPracticeDllMenuActive)
+        if (g_IsSpellPracticeMenuActive)
         {
-            i32 dllMenuResult = UpdateSpellPracticeDllMenu();
+            i32 dllMenuResult = UpdateSpellPracticeMenu();
             if (dllMenuResult == SPELL_PRACTICE_OPEN_RESULT_START_GAME)
             {
                 g_GameManager.currentStage = menu->cursor;
                 g_GameManager.menuCursorBackup = menu->cursor;
-                g_SpellPracticeSelectedSpellIndex =
-                    (g_SpellPracticeGetSelectedSpellFn != NULL) ? g_SpellPracticeGetSelectedSpellFn() : -1;
+                g_SpellPracticeSelectedSpellIndex = th06_spell_practice_get_selected_spell();
 
                 g_IsSpellPracticeGame =
                     (g_SpellPracticeSelectedSpellIndex >= 0) ? g_SpellPracticeSelectedSpellIndex : 0;
                 if (g_SpellPracticeSelectedSpellIndex >= 0)
                 {
                     g_LastSpellPracticeIndex = g_SpellPracticeSelectedSpellIndex;
-                    if (g_SpellPracticeGetSelectedParamsFn != NULL)
-                    {
-                        g_SpellPracticeGetSelectedParamsFn(&g_SpellPracticeMode, &g_SpellPracticeSection);
-                    }
-                    else
-                    {
-                        g_SpellPracticeMode = 2;
-                        g_SpellPracticeSection = 1;
-                    }
+                    th06_spell_practice_get_selected_params(&g_SpellPracticeMode, &g_SpellPracticeSection);
                 }
                 g_GameManager.isInPracticeMode = 1;
                 return StartGameFromMenu(menu);
@@ -1521,6 +1503,17 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
         }
         if (g_SpellPracticeStageConfiguring)
         {
+            if (g_SpellPracticeConfigCursor != 3)
+            {
+                g_SpellPracticePowerHoldDir = 0;
+                g_SpellPracticePowerHoldStep = 1;
+            }
+            if (g_SpellPracticeConfigCursor != 4)
+                g_SpellPracticeScoreDigit = 0;
+
+            u32 digitMask = ReadScoreDigitKeys();
+            u32 newDigits = digitMask & ~g_SpellPracticePrevDigitMask;
+            g_SpellPracticePrevDigitMask = digitMask;
 
             if (WAS_PRESSED_OR_REPEAT(TH_BUTTON_UP))
             {
@@ -1529,7 +1522,7 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
             }
             if (WAS_PRESSED_OR_REPEAT(TH_BUTTON_DOWN))
             {
-                if (g_SpellPracticeConfigCursor < 2)
+                if (g_SpellPracticeConfigCursor < 4)
                     g_SpellPracticeConfigCursor++;
             }
             if (WAS_PRESSED_OR_REPEAT(TH_BUTTON_LEFT))
@@ -1548,6 +1541,17 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
                 {
                     if (g_SpellPracticeRank > 1)
                         g_SpellPracticeRank--;
+                }
+                else if (g_SpellPracticeConfigCursor == 3)
+                {
+                    g_SpellPracticePower = ChangePracticePower(
+                        g_SpellPracticePower, -1, WAS_PRESSED(TH_BUTTON_LEFT) != 0,
+                        (g_CurFrameInput & TH_BUTTON_LEFT) != 0 && g_IsEigthFrameOfHeldInput != 0);
+                }
+                else if (g_SpellPracticeConfigCursor == 4)
+                {
+                    if (g_SpellPracticeScoreDigit > 0)
+                        g_SpellPracticeScoreDigit--;
                 }
             }
             if (WAS_PRESSED_OR_REPEAT(TH_BUTTON_RIGHT))
@@ -1569,6 +1573,29 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
                     if (g_SpellPracticeRank < 32)
                         g_SpellPracticeRank++;
                 }
+                else if (g_SpellPracticeConfigCursor == 3)
+                {
+                    g_SpellPracticePower = ChangePracticePower(
+                        g_SpellPracticePower, 1, WAS_PRESSED(TH_BUTTON_RIGHT) != 0,
+                        (g_CurFrameInput & TH_BUTTON_RIGHT) != 0 && g_IsEigthFrameOfHeldInput != 0);
+                }
+                else if (g_SpellPracticeConfigCursor == 4)
+                {
+                    if (g_SpellPracticeScoreDigit < SPELL_PRACTICE_SCORE_DIGITS - 1)
+                        g_SpellPracticeScoreDigit++;
+                }
+            }
+            if (g_SpellPracticeConfigCursor == 4)
+            {
+                for (i32 digit = 0; digit < 10; digit++)
+                {
+                    if ((newDigits & (1u << digit)) != 0)
+                    {
+                        InputPracticeScoreDigit(digit);
+                        g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
+                        break;
+                    }
+                }
             }
             if (WAS_PRESSED(TH_BUTTON_RETURNMENU))
             {
@@ -1580,7 +1607,7 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
             else if (WAS_PRESSED(TH_BUTTON_SELECTMENU))
             {
                 i32 spellPracticeResult = (g_CurFrameInput & TH_BUTTON_FOCUS)
-                                              ? TryOpenSpellPracticeDllMenu(g_SpellPracticeSelectedStage)
+                                              ? TryOpenSpellPracticeMenu(g_SpellPracticeSelectedStage)
                                               : SPELL_PRACTICE_OPEN_RESULT_NOT_HANDLED;
                 if (spellPracticeResult == SPELL_PRACTICE_OPEN_RESULT_MENU_RUNNING)
                 {
@@ -1645,7 +1672,7 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
                 if (g_CurFrameInput & TH_BUTTON_FOCUS)
                 {
 
-                    i32 spellPracticeResult = TryOpenSpellPracticeDllMenu(menu->cursor);
+                    i32 spellPracticeResult = TryOpenSpellPracticeMenu(menu->cursor);
                     if (spellPracticeResult == SPELL_PRACTICE_OPEN_RESULT_MENU_RUNNING)
                     {
                         g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
@@ -3303,7 +3330,7 @@ ZunResult MainMenu::ChoosePracticeLevel()
             selectedStage = 7;
         }
 
-        if (g_SpellPracticeFrontAnmLoaded && !g_IsSpellPracticeDllMenuActive)
+        if (g_SpellPracticeFrontAnmLoaded && !g_IsSpellPracticeMenuActive)
         {
 
             g_AsciiManager.color = (g_SpellPracticeStageConfiguring && g_SpellPracticeConfigCursor == 0)
@@ -3354,6 +3381,47 @@ ZunResult MainMenu::ChoosePracticeLevel()
             textPos.x = 120.0f;
             textPos.y = 192.0f;
             g_AsciiManager.AddFormatText(&textPos, "Rank: %d", g_SpellPracticeRank);
+
+            g_AsciiManager.color = (g_SpellPracticeStageConfiguring && g_SpellPracticeConfigCursor == 3)
+                                       ? (color << 0x18 | 0x00C0F0F0)
+                                       : ((color >> 1) << 0x18 | 0x0080C0C0);
+            if (g_SpellPracticeStageConfiguring && g_SpellPracticeConfigCursor == 3)
+            {
+                textPos.x = 90.0f;
+                textPos.y = 208.0f;
+                g_AsciiManager.AddFormatText(&textPos, ">>");
+            }
+            textPos.x = 120.0f;
+            textPos.y = 208.0f;
+            if (g_SpellPracticePower == SPELL_PRACTICE_POWER_AUTO)
+                g_AsciiManager.AddFormatText(&textPos, "Power: Auto");
+            else
+                g_AsciiManager.AddFormatText(&textPos, "Power: %d", g_SpellPracticePower);
+
+            g_AsciiManager.color = (g_SpellPracticeStageConfiguring && g_SpellPracticeConfigCursor == 4)
+                                       ? (color << 0x18 | 0x00C0F0F0)
+                                       : ((color >> 1) << 0x18 | 0x0080C0C0);
+            if (g_SpellPracticeStageConfiguring && g_SpellPracticeConfigCursor == 4)
+            {
+                textPos.x = 90.0f;
+                textPos.y = 224.0f;
+                g_AsciiManager.AddFormatText(&textPos, ">>");
+            }
+            textPos.x = 120.0f;
+            textPos.y = 224.0f;
+            g_AsciiManager.AddFormatText(&textPos, "Score: %.9d", g_SpellPracticeScore);
+            if (g_SpellPracticeStageConfiguring && g_SpellPracticeConfigCursor == 4)
+            {
+                char caretText[SPELL_PRACTICE_SCORE_DIGITS + 8];
+                i32 caretLen = 0;
+                for (i32 i = 0; i < 7 + g_SpellPracticeScoreDigit; i++)
+                    caretText[caretLen++] = ' ';
+                caretText[caretLen++] = '^';
+                caretText[caretLen] = '\0';
+                textPos.x = 120.0f;
+                textPos.y = 244.0f;
+                g_AsciiManager.AddFormatText(&textPos, caretText);
+            }
         }
 
         textPos.x = 320.0f;
@@ -3781,7 +3849,7 @@ ZunResult MainMenu::RegisterChain(u32 isDemo)
     menu->chainDraw = g_Chain.CreateElem((ChainCallback)MainMenu::OnDraw);
     menu->chainDraw->arg = menu;
     g_Chain.AddToDrawChain(menu->chainDraw, TH_CHAIN_PRIO_DRAW_MAINMENU);
-    g_SpellPracticeDrawChain.callback = (ChainCallback)DrawSpellPracticeDllMenu;
+    g_SpellPracticeDrawChain.callback = (ChainCallback)DrawSpellPracticeMenu;
     g_SpellPracticeDrawChain.addedCallback = NULL;
     g_SpellPracticeDrawChain.deletedCallback = NULL;
     g_SpellPracticeDrawChain.arg = NULL;
@@ -3881,7 +3949,7 @@ ZunResult MainMenu::AddedCallback(MainMenu *m)
 
 ZunResult MainMenu::DeletedCallback(MainMenu *menu)
 {
-    UnloadSpellPracticeDll();
+    ResetSpellPracticeMenu();
     AnmManager *mgr;
     void *replay;
     i32 i1, i2;

@@ -22,6 +22,7 @@
 #include "Screenshot.hpp"
 #include "SoundFontSynth.hpp"
 #include "SoundPlayer.hpp"
+#include "SpellPracticeApi.hpp"
 #include "TextHelper.hpp"
 #include "i18n.hpp"
 #include "inttypes.hpp"
@@ -55,6 +56,8 @@ i32 g_ReplayTotalFrames = 0;
 u16 g_RealCurFrameInput;
 i32 g_LastSpellPracticeIndex = -1;
 i32 g_SpellPracticeRank = 16;
+i32 g_SpellPracticePower = SPELL_PRACTICE_POWER_AUTO;
+i32 g_SpellPracticeScore = 0;
 i32 g_ReturnToPractice;
 i32 g_SpellPracticeLastSelectedSpellIndex;
 i32 g_MoveShift;

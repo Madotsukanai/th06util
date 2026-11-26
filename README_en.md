@@ -10,7 +10,7 @@ A performance enhancement and feature extension patch for *Touhou Koumakyou ~ th
 ## Installation & How to Play
 
 1. Download the latest `th06UtilityTool.zip` from [Releases](../../releases) and extract it.
-2. Copy the extracted files (`launcher.exe`, `th06_spell_practice.dll`, `custom_new.ini`) into your official **Touhou Koumakyou ver 1.02h** game directory (where `東方紅魔郷.exe` is located).
+2. Copy the extracted files (`launcher.exe`, `custom_new.ini`) into your official **Touhou Koumakyou ver 1.02h** game directory (where `東方紅魔郷.exe` is located).
 3. Run `launcher.exe`. The patch will be applied automatically and launch the enhanced game.
 
 ---
@@ -42,7 +42,7 @@ A performance enhancement and feature extension patch for *Touhou Koumakyou ~ th
   - Arcade stick friendly button layout (shift focus button to the far right via `move_shift`)
 
 - **Gameplay, Practice & Networking**
-  - Built-in Spell Practice mode via companion DLL (Hold Shift and select stage in Practice menu)
+  - Built-in Spell Practice mode (Hold Shift and select stage in Practice menu)
   - Online multiplayer support (P2P Host/Guest matching for network co-op / versus)
   - Compatibility with thprac replays
   - Fast-forward replay playback (up to 5x speed)
@@ -67,7 +67,7 @@ A performance enhancement and feature extension patch for *Touhou Koumakyou ~ th
 ## Feature Details
 
 ### Spell Practice
-With `th06_spell_practice.dll` placed in the game directory, **hold Shift while selecting a stage in the Practice menu** to bring up the Spell Practice menu. You can select and practice any individual spell card.
+**Hold Shift while selecting a stage in the Practice menu** to bring up the Spell Practice menu. You can select and practice any individual spell card.
 
 ### Online Play (Experimental)
 Supports peer-to-peer multiplayer over local network (different network / WAN play is currently undergoing verification).  
@@ -245,7 +245,7 @@ cd th06util
 :: (Required for required game data extraction and linking)
 copy C:\path\to\th06.exe resources\game.exe
 
-:: Build all targets (th06util.exe, launcher.exe, patch, dll)
+:: Build all targets (th06util.exe, launcher.exe, patch)
 nmake /f Nmakefile
 
 :: Create release ZIP package (build\th06UtilityTool.zip)

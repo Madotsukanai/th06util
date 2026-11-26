@@ -2,7 +2,7 @@
 #include <cstdio>
 #include <cstring>
 
-#include "SpellPracticeDllApi.hpp"
+#include "SpellPracticeApi.hpp"
 #include "inttypes.hpp"
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
@@ -399,7 +399,13 @@ struct MenuState
     int lives;
     int bombs;
     int rank;
-    bool configuring;        // true = spell chosen, now adjusting lives/bombs/rank
+    int power;
+    int score;
+    HWND gameWindow;
+    int scoreDigit;
+    int powerHoldDir;
+    int powerHoldStep;
+    bool configuring;        // true = spell chosen, now adjusting the practice settings
     int selectedSpellCursor; // cursor value saved when entering config mode
     int frame;               // start frame typed into the "frame specify" row (0 .. FRAME_MAX)
     bool frameEditing;       // true = editing the digits of `frame`
@@ -408,12 +414,13 @@ struct MenuState
 };
 
 MenuState g_Menu;
+static u32 s_prevDigitKeyMask = 0;
 
 // The list shown to the player has one extra row on top: row 0 is "フレーム指定" (start the stage from a frame the
 // player types in). Rows 1.. are the filtered spells, so spell number i is at row i + 1.
 // A frame start is reported to the game as the "section" value FRAME_SECTION_BASE + frame (see
-// SPELL_PRACTICE_FRAME_SECTION_BASE in SpellPracticeDllApi.hpp), because the DLL is reloaded when the game starts and
-// the section value is the only thing that travels from the menu to th06_spell_practice_apply_ecl_patch.
+// SPELL_PRACTICE_FRAME_SECTION_BASE in SpellPracticeApi.hpp), so the section value is the only thing that travels
+// from the menu to th06_spell_practice_apply_ecl_patch.
 const int FRAME_SECTION_BASE = th06::SPELL_PRACTICE_FRAME_SECTION_BASE;
 const int FRAME_MAX = 65535; // the warp time is carried in 16 bits
 
@@ -433,6 +440,73 @@ bool WasPressed(u16 curInput, u16 lastInput, u16 mask)
 bool WasPressedWeird(u16 curInput, u16 lastInput, u16 isEighthFrameHeldInput, u16 mask)
 {
     return WasPressed(curInput, lastInput, mask) || (((curInput & mask) != 0) && (isEighthFrameHeldInput != 0));
+}
+
+static u32 ReadDigitKeys()
+{
+    if (g_Menu.gameWindow == NULL || GetForegroundWindow() != g_Menu.gameWindow)
+        return 0;
+    u32 mask = 0;
+    for (int digit = 0; digit < 10; digit++)
+    {
+        if ((GetAsyncKeyState('0' + digit) & 0x8000) != 0 || (GetAsyncKeyState(VK_NUMPAD0 + digit) & 0x8000) != 0)
+            mask |= 1u << digit;
+    }
+    return mask;
+}
+
+static int MenuScorePlace()
+{
+    int place = 1;
+    for (int i = g_Menu.scoreDigit + 1; i < th06::SPELL_PRACTICE_SCORE_DIGITS; i++)
+        place *= 10;
+    return place;
+}
+
+static void InputMenuScoreDigit(int digit)
+{
+    int place = MenuScorePlace();
+    int oldDigit = (g_Menu.score / place) % 10;
+    g_Menu.score += (digit - oldDigit) * place;
+    if (g_Menu.scoreDigit < th06::SPELL_PRACTICE_SCORE_DIGITS - 1)
+        g_Menu.scoreDigit++;
+}
+
+static int ApplyMenuPowerChange(int power, int dir, bool newlyPressed, bool repeating)
+{
+    if (dir == 0)
+    {
+        g_Menu.powerHoldDir = 0;
+        g_Menu.powerHoldStep = 1;
+        return power;
+    }
+    if (newlyPressed || g_Menu.powerHoldDir != dir)
+    {
+        g_Menu.powerHoldDir = dir;
+        g_Menu.powerHoldStep = 1;
+    }
+    else if (repeating)
+    {
+        if (g_Menu.powerHoldStep < th06::SPELL_PRACTICE_POWER_STEP_MAX)
+            g_Menu.powerHoldStep++;
+    }
+    else
+    {
+        return power;
+    }
+    if (dir < 0)
+    {
+        power -= g_Menu.powerHoldStep;
+        if (power < th06::SPELL_PRACTICE_POWER_AUTO)
+            power = th06::SPELL_PRACTICE_POWER_AUTO;
+    }
+    else
+    {
+        power += g_Menu.powerHoldStep;
+        if (power > th06::SPELL_PRACTICE_POWER_MAX)
+            power = th06::SPELL_PRACTICE_POWER_MAX;
+    }
+    return power;
 }
 
 void ClampScroll()
@@ -536,16 +610,22 @@ static void ecl_stall(int offset)
     ecl_write32(offset + 8, 0x0000ff00);
 }
 
-extern "C" __declspec(dllexport) int __stdcall th06_spell_practice_open_menu(HWND /*gameWindow*/, int difficulty,
-                                                                             int character, int shotType,
-                                                                             int stageIndex, void * /*fontPtr*/)
+extern "C" int __stdcall th06_spell_practice_open_menu(HWND gameWindow, int difficulty,
+                                                                              int character, int shotType,
+                                                                              int stageIndex, void * /*fontPtr*/)
+
 {
     int prevLives = g_Menu.lives;
     int prevBombs = g_Menu.bombs;
     int prevRank = g_Menu.rank;
+    int prevPower = g_Menu.power;
+    int prevScore = g_Menu.score;
     int prevFrame = g_Menu.frame;
     std::memset(&g_Menu, 0, sizeof(g_Menu));
     g_Menu.active = true;
+    g_Menu.gameWindow = gameWindow;
+    g_Menu.powerHoldStep = 1;
+    s_prevDigitKeyMask = ReadDigitKeys();
     g_Menu.frame = (prevFrame >= 0 && prevFrame <= FRAME_MAX) ? prevFrame : 0;
     g_Menu.frameDigit = 2; // start on the hundreds digit
     g_Menu.difficulty = difficulty;
@@ -559,15 +639,19 @@ extern "C" __declspec(dllexport) int __stdcall th06_spell_practice_open_menu(HWN
     g_Menu.lives = (prevLives >= 0 && prevLives <= 8) ? prevLives : 8;
     g_Menu.bombs = (prevBombs >= 0 && prevBombs <= 8) ? prevBombs : 8;
     g_Menu.rank = (prevRank >= 1 && prevRank <= 32) ? prevRank : 16;
+    g_Menu.power = (prevPower >= th06::SPELL_PRACTICE_POWER_AUTO && prevPower <= th06::SPELL_PRACTICE_POWER_MAX)
+                       ? prevPower
+                       : th06::SPELL_PRACTICE_POWER_AUTO;
+    g_Menu.score = (prevScore >= 0 && prevScore <= th06::SPELL_PRACTICE_SCORE_MAX) ? prevScore : 0;
     BuildFilteredList();
     return th06::SPELL_PRACTICE_OPEN_RESULT_MENU_RUNNING;
 }
 
-extern "C" __declspec(dllexport) void __stdcall th06_spell_practice_draw_menu()
+extern "C" void __stdcall th06_spell_practice_draw_menu()
 {
 }
 
-extern "C" __declspec(dllexport) int __stdcall th06_spell_practice_update_menu(u16 curInput, u16 lastInput,
+extern "C" int __stdcall th06_spell_practice_update_menu(u16 curInput, u16 lastInput,
                                                                                u16 isEighthFrameHeldInput)
 {
     if (!g_Menu.active)
@@ -582,7 +666,18 @@ extern "C" __declspec(dllexport) int __stdcall th06_spell_practice_update_menu(u
 
     if (g_Menu.configuring)
     {
-        // Config mode: UP/DOWN moves between lives(0)/bombs(1)/rank(2) rows
+        if (g_Menu.cursor != 3)
+        {
+            g_Menu.powerHoldDir = 0;
+            g_Menu.powerHoldStep = 1;
+        }
+        if (g_Menu.cursor != 4)
+            g_Menu.scoreDigit = 0;
+
+        u32 digitMask = ReadDigitKeys();
+        u32 newDigits = digitMask & ~s_prevDigitKeyMask;
+        s_prevDigitKeyMask = digitMask;
+
         if (WasPressedWeird(curInput, lastInput, isEighthFrameHeldInput, TH_BUTTON_UP))
         {
             if (g_Menu.cursor > 0)
@@ -590,7 +685,7 @@ extern "C" __declspec(dllexport) int __stdcall th06_spell_practice_update_menu(u
         }
         if (WasPressedWeird(curInput, lastInput, isEighthFrameHeldInput, TH_BUTTON_DOWN))
         {
-            if (g_Menu.cursor < 2)
+            if (g_Menu.cursor < 4)
                 g_Menu.cursor++;
         }
         if (g_Menu.cursor == 0)
@@ -630,6 +725,37 @@ extern "C" __declspec(dllexport) int __stdcall th06_spell_practice_update_menu(u
             {
                 if (g_Menu.rank < 32)
                     g_Menu.rank++;
+            }
+        }
+        if (g_Menu.cursor == 3)
+        {
+            const bool leftHeld = (curInput & TH_BUTTON_LEFT) != 0;
+            const bool rightHeld = (curInput & TH_BUTTON_RIGHT) != 0;
+            const int dir = rightHeld ? 1 : (leftHeld ? -1 : 0);
+            const bool edge = dir < 0 ? WasPressed(curInput, lastInput, TH_BUTTON_LEFT)
+                                      : (dir > 0 ? WasPressed(curInput, lastInput, TH_BUTTON_RIGHT) : false);
+            const bool repeat = dir != 0 && isEighthFrameHeldInput != 0;
+            g_Menu.power = ApplyMenuPowerChange(g_Menu.power, dir, edge, repeat);
+        }
+        if (g_Menu.cursor == 4)
+        {
+            for (int digit = 0; digit < 10; digit++)
+            {
+                if ((newDigits & (1u << digit)) != 0)
+                {
+                    InputMenuScoreDigit(digit);
+                    break;
+                }
+            }
+            if (WasPressedWeird(curInput, lastInput, isEighthFrameHeldInput, TH_BUTTON_LEFT))
+            {
+                if (g_Menu.scoreDigit > 0)
+                    g_Menu.scoreDigit--;
+            }
+            if (WasPressedWeird(curInput, lastInput, isEighthFrameHeldInput, TH_BUTTON_RIGHT))
+            {
+                if (g_Menu.scoreDigit < th06::SPELL_PRACTICE_SCORE_DIGITS - 1)
+                    g_Menu.scoreDigit++;
             }
         }
         if (WasPressed(curInput, lastInput, TH_BUTTON_RETURNMENU))
@@ -733,7 +859,7 @@ struct CatkEntry
     u16 numSuccess;       // 0x3e
 };
 
-extern "C" __declspec(dllexport) int __stdcall th06_spell_practice_get_draw_data(
+extern "C" int __stdcall th06_spell_practice_get_draw_data(
     th06::SpellPracticeDrawData *outDrawData, const void *catkData, int catkCount)
 {
     if (!g_Menu.active || !outDrawData)
@@ -808,13 +934,43 @@ extern "C" __declspec(dllexport) int __stdcall th06_spell_practice_get_draw_data
     char rankText[32];
     _snprintf(rankText, sizeof(rankText), "Rank: %d", g_Menu.rank);
     AddItem(outDrawData, 380.0f, 156.0f, 0xFFF0F0F0, rankText);
+    char powerText[32];
+    if (g_Menu.power == th06::SPELL_PRACTICE_POWER_AUTO)
+        _snprintf(powerText, sizeof(powerText), "Power: Auto");
+    else
+        _snprintf(powerText, sizeof(powerText), "Power: %d", g_Menu.power);
+    AddItem(outDrawData, 380.0f, 174.0f, 0xFFF0F0F0, powerText);
+    char scoreText[32];
+    _snprintf(scoreText, sizeof(scoreText), "Score: %.9d", g_Menu.score);
+    AddItem(outDrawData, 380.0f, 192.0f, 0xFFF0F0F0, scoreText);
+    if (g_Menu.configuring && g_Menu.cursor == 4)
+    {
+        char caretText[th06::SPELL_PRACTICE_SCORE_DIGITS + 8];
+        int caretLen = 0;
+        for (int i = 0; i < 7 + g_Menu.scoreDigit; i++)
+            caretText[caretLen++] = ' ';
+        caretText[caretLen++] = '^';
+        caretText[caretLen] = '\0';
+        AddItem(outDrawData, 380.0f, 208.0f, 0xFFFFFFFF, caretText);
+    }
     if (g_Menu.configuring)
     {
-        // Show config-mode cursor on the right panel (lives=120, bombs=138, rank=156)
-        const float configY = (g_Menu.cursor == 0) ? 120.0f : (g_Menu.cursor == 1) ? 138.0f : 156.0f;
+        const float configY = (g_Menu.cursor == 0)   ? 120.0f
+                              : (g_Menu.cursor == 1) ? 138.0f
+                              : (g_Menu.cursor == 2) ? 156.0f
+                              : (g_Menu.cursor == 3) ? 174.0f
+                                                     : 192.0f;
         AddItem(outDrawData, 360.0f, configY, 0xFFFFFFFF, ">>");
-        AddItem(outDrawData, 90.0f, 352.0f, 0xC0D0D0D0, "UP/DOWN:Move  SHOT:Start  BOMB:Back");
-        AddItem(outDrawData, 90.0f, 364.0f, 0xC0D0D0D0, "LEFT/RIGHT:Change Value");
+        if (g_Menu.cursor == 4)
+        {
+            AddItem(outDrawData, 90.0f, 352.0f, 0xC0D0D0D0, "UP/DOWN:Move  LEFT/RIGHT:Digit  TYPE:0-9");
+            AddItem(outDrawData, 90.0f, 364.0f, 0xC0D0D0D0, "SHOT:Start  BOMB:Back");
+        }
+        else
+        {
+            AddItem(outDrawData, 90.0f, 352.0f, 0xC0D0D0D0, "UP/DOWN:Move  SHOT:Start  BOMB:Back");
+            AddItem(outDrawData, 90.0f, 364.0f, 0xC0D0D0D0, "LEFT/RIGHT:Change Value");
+        }
     }
     else if (g_Menu.frameEditing)
     {
@@ -828,40 +984,62 @@ extern "C" __declspec(dllexport) int __stdcall th06_spell_practice_get_draw_data
     return outDrawData->itemCount;
 }
 
-extern "C" __declspec(dllexport) int __stdcall th06_spell_practice_get_lives()
+extern "C" int __stdcall th06_spell_practice_get_lives()
 {
     return g_Menu.lives;
 }
 
-extern "C" __declspec(dllexport) void __stdcall th06_spell_practice_set_lives(int lives)
+extern "C" void __stdcall th06_spell_practice_set_lives(int lives)
 {
     if (lives >= 0 && lives <= 8)
         g_Menu.lives = lives;
 }
 
-extern "C" __declspec(dllexport) int __stdcall th06_spell_practice_get_bombs()
+extern "C" int __stdcall th06_spell_practice_get_bombs()
 {
     return g_Menu.bombs;
 }
 
-extern "C" __declspec(dllexport) void __stdcall th06_spell_practice_set_bombs(int bombs)
+extern "C" void __stdcall th06_spell_practice_set_bombs(int bombs)
 {
     if (bombs >= 0 && bombs <= 8)
         g_Menu.bombs = bombs;
 }
 
-extern "C" __declspec(dllexport) int __stdcall th06_spell_practice_get_rank()
+extern "C" int __stdcall th06_spell_practice_get_rank()
 {
     return g_Menu.rank;
 }
 
-extern "C" __declspec(dllexport) void __stdcall th06_spell_practice_set_rank(int rank)
+extern "C" void __stdcall th06_spell_practice_set_rank(int rank)
 {
     if (rank >= 1 && rank <= 32)
         g_Menu.rank = rank;
 }
 
-extern "C" __declspec(dllexport) int __stdcall th06_spell_practice_get_selected_spell()
+extern "C" int __stdcall th06_spell_practice_get_power()
+{
+    return g_Menu.power;
+}
+
+extern "C" void __stdcall th06_spell_practice_set_power(int power)
+{
+    if (power >= th06::SPELL_PRACTICE_POWER_AUTO && power <= th06::SPELL_PRACTICE_POWER_MAX)
+        g_Menu.power = power;
+}
+
+extern "C" int __stdcall th06_spell_practice_get_score()
+{
+    return g_Menu.score;
+}
+
+extern "C" void __stdcall th06_spell_practice_set_score(int score)
+{
+    if (score >= 0 && score <= th06::SPELL_PRACTICE_SCORE_MAX)
+        g_Menu.score = score;
+}
+
+extern "C" int __stdcall th06_spell_practice_get_selected_spell()
 {
     // In config mode, use the saved spell cursor; otherwise use the current cursor
     const int spellCursor = g_Menu.configuring ? g_Menu.selectedSpellCursor : g_Menu.cursor;
@@ -873,7 +1051,7 @@ extern "C" __declspec(dllexport) int __stdcall th06_spell_practice_get_selected_
     return kSpellDefs[g_Menu.filteredIndices[spellCursor - 1]].section;
 }
 
-extern "C" __declspec(dllexport) void __stdcall th06_spell_practice_get_selected_params(int *mode, int *section)
+extern "C" void __stdcall th06_spell_practice_get_selected_params(int *mode, int *section)
 {
     // mode/section are not used by the new patch function; kept for API compat
     if (mode)
@@ -882,7 +1060,7 @@ extern "C" __declspec(dllexport) void __stdcall th06_spell_practice_get_selected
         *section = 0;
 }
 
-extern "C" __declspec(dllexport) void __stdcall th06_spell_practice_set_cursor_to_spell(int spellIndex)
+extern "C" void __stdcall th06_spell_practice_set_cursor_to_spell(int spellIndex)
 {
     // A frame start (section value FRAME_SECTION_BASE + frame): put the cursor on the frame row, keeping the frame
     if (spellIndex >= FRAME_SECTION_BASE)
@@ -1070,7 +1248,7 @@ static bool IsSpellSection(TH06Section s)
 
 // Apply ECL patch – spellIndex is a TH06Section value, eclFile is the raw ECL buffer
 // shot: 0=ReimuA, 1=ReimuB, 2=MarisaA, 3=MarisaB (passed by caller, avoids hardcoded address)
-extern "C" __declspec(dllexport) int __cdecl th06_spell_practice_apply_ecl_patch(int spellIndex, void *eclFile,
+extern "C" int __cdecl th06_spell_practice_apply_ecl_patch(int spellIndex, void *eclFile,
                                                                                  int shot)
 {
     g_EclFile = (u8 *)eclFile;

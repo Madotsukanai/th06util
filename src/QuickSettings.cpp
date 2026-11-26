@@ -22,7 +22,7 @@ namespace th06
 namespace QuickSettings
 {
 // th06util としてのバージョン（ゲーム本体のバージョン 1.02 とは別）。
-#define TH06UTIL_VERSION "1.12"
+#define TH06UTIL_VERSION "1.14"
 
 enum ItemKind
 {

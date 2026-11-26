@@ -10,7 +10,7 @@
 ## 導入方法・使い方
 
 1. [Releases](../../releases) より最新版の `th06UtilityTool.zip` をダウンロードして解凍します。
-2. 解凍したファイル（`launcher.exe`, `th06_spell_practice.dll`, `custom_new.ini`）を、正規の**東方紅魔郷 ver1.02h**（`東方紅魔郷.exe` があるフォルダ）と同じディレクトリに配置します。
+2. 解凍したファイル（`launcher.exe`, `custom_new.ini`）を、正規の**東方紅魔郷 ver1.02h**（`東方紅魔郷.exe` があるフォルダ）と同じディレクトリに配置します。
 3. `launcher.exe` を起動します。自動的にパッチが適用され、拡張版が起動します。
 
 ---
@@ -43,7 +43,7 @@
   - アケコン配置向けの低速移動ボタン右端移動（`move_shift`）
 
 - **ゲームプレイ・練習・通信**
-  - 同梱 DLL によるスペルプラクティス機能（Practice 画面で Shift を押しながら決定）
+  - ゲーム本体に統合されたスペルプラクティス機能（Practice 画面で Shift を押しながら決定）
   - オンラインマルチプレイ機能（Host/Guest P2P 通信による遠隔対戦）
   - thprac リプレイとの互換性確保
   - リプレイ再生時の倍速送り機能（最大5倍速）
@@ -68,7 +68,7 @@
 ## 一部追加機能の詳述
 
 ### スペルプラクティス
-ゲームディレクトリに `th06_spell_practice.dll` を置いた状態で、**Practice メニューで Shift キーを押しながらステージを決定**するとスペルプラクティスメニューが出現します。ここから任意のスペルカードを選択してプレイできます。
+**Practice メニューで Shift キーを押しながらステージを決定**するとスペルプラクティスメニューが出現します。ここから任意のスペルカードを選択してプレイできます。
 
 ### オンラインプレイ（試験的機能）
 同一LAN内でのマルチプレイに対応しています（異なるLAN環境での動作は検証中）。  
@@ -247,7 +247,7 @@ cd th06util
 :: ※ 必須ゲームデータの抽出およびコンパイル・リンクに必須です。
 copy C:\path\to\東方紅魔郷.exe resources\game.exe
 
-:: ビルド (th06util.exe, launcher.exe, patch, dll を一括ビルド)
+:: ビルド (th06util.exe, launcher.exe, patch を一括ビルド)
 nmake /f Nmakefile
 
 :: 配布用 zip (build\th06UtilityTool.zip) の作成
