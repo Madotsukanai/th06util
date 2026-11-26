@@ -10,7 +10,7 @@
 ## 導入方法・使い方
 
 1. [Releases](../../releases) より最新版の `th06UtilityTool.zip` をダウンロードして解凍します。
-2. 解凍したファイル（`launcher.exe`, `kouma_patch.delta`, `th06_spell_practice.dll`, `custom_new.ini`）を、正規の**東方紅魔郷 ver1.02h**（`東方紅魔郷.exe` があるフォルダ）と同じディレクトリに配置します。
+2. 解凍したファイル（`launcher.exe`, `th06_spell_practice.dll`, `custom_new.ini`）を、正規の**東方紅魔郷 ver1.02h**（`東方紅魔郷.exe` があるフォルダ）と同じディレクトリに配置します。
 3. `launcher.exe` を起動します。自動的にパッチが適用され、拡張版が起動します。
 
 ---

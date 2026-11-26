@@ -10,7 +10,7 @@ A performance enhancement and feature extension patch for *Touhou Koumakyou ~ th
 ## Installation & How to Play
 
 1. Download the latest `th06UtilityTool.zip` from [Releases](../../releases) and extract it.
-2. Copy the extracted files (`launcher.exe`, `kouma_patch.delta`, `th06_spell_practice.dll`, `custom_new.ini`) into your official **Touhou Koumakyou ver 1.02h** game directory (where `東方紅魔郷.exe` is located).
+2. Copy the extracted files (`launcher.exe`, `th06_spell_practice.dll`, `custom_new.ini`) into your official **Touhou Koumakyou ver 1.02h** game directory (where `東方紅魔郷.exe` is located).
 3. Run `launcher.exe`. The patch will be applied automatically and launch the enhanced game.
 
 ---
